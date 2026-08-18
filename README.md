@@ -40,6 +40,7 @@ open http://din8sty.panenka.games:3080
 Same bot process (`top4-ping-bot`):
 
 - **Top-4:** turn pings, pick log, `/pihajme`, `/deadline`
+- **FPL 2026:** pick log to topic `/2`, turn DMs, `/fpl` email bind
 - **H2H (Пекло):** `/h2h` — bind email, notify on your turn & opponent picks, draft by numbers (`0` = back)
 
 ```bash

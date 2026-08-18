@@ -11,6 +11,8 @@
  * (OOD always autopicks: wishlist else highest fm_rating).
  * Also posts every new draft pick to TOP4_PICK_LOG_CHAT_ID + TOP4_PICK_LOG_THREAD_ID
  * (forum topic; structured log only).
+ * FPL 2026: pick logs to FPL_PICK_LOG_CHAT_ID + FPL_PICK_LOG_THREAD_ID
+ * (default https://t.me/c/2419087266/2) and turn DMs via the same email map.
  *
  * Token: TOP4_PING_BOT_TOKEN or TELEGRAM_PIHAJME_TOKEN (env / .env — never commit).
  */
@@ -36,6 +38,12 @@ import {
   handleH2hMessage,
   h2hHelpLine,
 } from "./h2hDraftBot.js";
+import {
+  checkFplDraft,
+  ensureFplBotTables,
+  fplHelpLine,
+  handleFplMessage,
+} from "./fplDraftBot.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, "..");
@@ -44,6 +52,9 @@ const POLL_MS = Number(process.env.TOP4_PING_POLL_MS ?? 20_000);
 /** Forum topic https://t.me/c/2419087266/3 — prefer env overrides. */
 const DEFAULT_PICK_LOG_CHAT_ID = -1002419087266;
 const DEFAULT_PICK_LOG_THREAD_ID = 3;
+/** FPL 2026 pick logs: https://t.me/c/2419087266/2 */
+const DEFAULT_FPL_PICK_LOG_CHAT_ID = -1002419087266;
+const DEFAULT_FPL_PICK_LOG_THREAD_ID = 2;
 const LEAGUE_SHORT: Record<string, string> = {
   GB1: "ENG",
   ES1: "SPA",
@@ -174,6 +185,28 @@ function configuredPickLogThreadId(): number {
   return DEFAULT_PICK_LOG_THREAD_ID;
 }
 
+function configuredFplPickLogChatId(): number {
+  loadDotEnv();
+  const raw = process.env.FPL_PICK_LOG_CHAT_ID?.trim();
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+    console.error(`[fpl-bot] invalid FPL_PICK_LOG_CHAT_ID=${raw}, using default`);
+  }
+  return DEFAULT_FPL_PICK_LOG_CHAT_ID;
+}
+
+function configuredFplPickLogThreadId(): number {
+  loadDotEnv();
+  const raw = process.env.FPL_PICK_LOG_THREAD_ID?.trim();
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) return n;
+    console.error(`[fpl-bot] invalid FPL_PICK_LOG_THREAD_ID=${raw}, using default`);
+  }
+  return DEFAULT_FPL_PICK_LOG_THREAD_ID;
+}
+
 function requireToken(): string {
   loadDotEnv();
   const token =
@@ -195,6 +228,7 @@ function openDb(): Database.Database {
   db.pragma("busy_timeout = 5000");
   ensureTop4Tables(db);
   ensureH2hBotTables(db);
+  ensureFplBotTables(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS top4_pick_log_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -623,6 +657,8 @@ function matchTeam(raw: string, teams: TeamOption[]): TeamOption | null {
 class TelegramApi {
   pickLogChatId: number | null = null;
   pickLogThreadId: number | null = null;
+  fplPickLogChatId: number | null = null;
+  fplPickLogThreadId: number | null = null;
 
   constructor(private readonly token: string) {}
 
@@ -669,6 +705,19 @@ class TelegramApi {
     });
   }
 
+  sendFplPickLog(text: string): Promise<{ message_id: number }> {
+    if (this.fplPickLogChatId == null || this.fplPickLogThreadId == null) {
+      return Promise.reject(new Error("fpl pick-log chat/thread not configured"));
+    }
+    return this.sendMessage(this.fplPickLogChatId, text, {
+      messageThreadId: this.fplPickLogThreadId,
+    });
+  }
+
+  fplPickLogReady(): boolean {
+    return this.fplPickLogChatId != null && this.fplPickLogThreadId != null;
+  }
+
   getUpdates(offset: number, timeoutSec: number): Promise<TgUpdate[]> {
     return this.call("getUpdates", {
       offset,
@@ -699,6 +748,30 @@ class TelegramApi {
       return false;
     }
   }
+
+  async resolveFplPickLogChat(): Promise<boolean> {
+    const chatId = configuredFplPickLogChatId();
+    const threadId = configuredFplPickLogThreadId();
+    try {
+      if (this.pickLogChatId !== chatId) {
+        await this.call<{ id: number }>("getChat", { chat_id: chatId });
+      }
+      this.fplPickLogChatId = chatId;
+      this.fplPickLogThreadId = threadId;
+      console.log(
+        `[fpl-bot] pick-log topic ok chat_id=${chatId} thread_id=${threadId}`,
+      );
+      return true;
+    } catch (err) {
+      this.fplPickLogChatId = null;
+      this.fplPickLogThreadId = null;
+      console.error(
+        `[fpl-bot] pick-log getChat failed chat_id=${chatId} thread_id=${threadId}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return false;
+    }
+  }
 }
 
 async function handleBindFlow(
@@ -717,7 +790,9 @@ async function handleBindFlow(
     pendingDeadline.delete(userId);
     await api.sendMessage(
       chatId,
-      "Бот Din8sty / Пекло.\n\nТоп-4:\n/pihajme — привязать команду\n/testping — пробный пинг\n/deadline — напоминания дедлайна\n\nH2H:\n" +
+      "Бот Din8sty / Пекло.\n\nТоп-4:\n/pihajme — привязать команду\n/testping — пробный пинг\n/deadline — напоминания дедлайна\n\nFPL 2026:\n" +
+        fplHelpLine() +
+        "\n\nH2H:\n" +
         h2hHelpLine(),
     );
     return true;
@@ -1224,6 +1299,7 @@ async function main(): Promise<void> {
   console.log(`[top4-ping] started as @${me.username ?? "?"} poll=${POLL_MS}ms`);
   ensurePickLogState(db);
   await api.resolvePickLogChat();
+  await api.resolveFplPickLogChat();
 
   let offset = 0;
   let polling = false;
@@ -1237,6 +1313,7 @@ async function main(): Promise<void> {
       await checkTurns(db, api);
       await checkDeadlineReminders(db, api);
       await checkH2hNotifications(db, api);
+      await checkFplDraft(db, api);
     } catch (err) {
       console.error("[top4-ping] poll:", err instanceof Error ? err.message : err);
     } finally {
@@ -1257,8 +1334,10 @@ async function main(): Promise<void> {
         const msg = u.message;
         if (!msg?.text || !msg.from) continue;
         try {
-          const handledH2h = await handleH2hMessage(db, api, msg, msg.text);
-          if (!handledH2h) {
+          const handledFpl = await handleFplMessage(db, api, msg, msg.text);
+          const handledH2h =
+            !handledFpl && (await handleH2hMessage(db, api, msg, msg.text));
+          if (!handledFpl && !handledH2h) {
             await handleBindFlow(db, api, msg, msg.text);
           }
         } catch (err) {
@@ -1269,7 +1348,7 @@ async function main(): Promise<void> {
           try {
             await api.sendMessage(
               msg.chat.id,
-              "Ошибка. Попробуй /h2h или /pihajme.",
+              "Ошибка. Попробуй /h2h, /fpl или /pihajme.",
             );
           } catch {
             /* ignore */
