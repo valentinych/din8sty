@@ -44,6 +44,14 @@ type FplPick = {
   clubName: string;
 };
 
+type FplMember = {
+  email: string;
+  teamName: string;
+  displayName: string;
+  draftSlot?: number | null;
+  outOfDraft: boolean;
+};
+
 type FplSnapshot = {
   ok?: boolean;
   error?: string;
@@ -51,6 +59,7 @@ type FplSnapshot = {
   size: number;
   currentPickNo: number;
   maxPickNumber: number;
+  totalPicks?: number;
   onClock: {
     email: string;
     teamName: string;
@@ -60,13 +69,11 @@ type FplSnapshot = {
     round: number;
   } | null;
   picks: FplPick[];
-  members: {
-    email: string;
-    teamName: string;
-    displayName: string;
-    outOfDraft: boolean;
-  }[];
+  members: FplMember[];
 };
+
+/** Fallback if an older panenka snapshot omits totalPicks (23 rounds). */
+const FPL_PICKS_PER_MANAGER = 23;
 
 const pendingFpl = new Map<number, { at: number }>();
 let coverageLogged = false;
@@ -103,14 +110,84 @@ export function formatFplPingMessage(teamName?: string | null): string {
   return `${phrase}\n\n${context}\n${DRAFT_URL}`;
 }
 
-export function formatFplPickLog(pick: FplPick): string {
-  const club = pick.clubShort || pick.clubName || "?";
-  return [
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/** Snake: round 1 = slots 1..N, round 2 = N..1, same as panenka memberSlotForPick. */
+function memberSlotForPick(pickNo: number, size: number): number {
+  const round = Math.ceil(pickNo / size);
+  const idxInRound = ((pickNo - 1) % size) + 1;
+  return round % 2 === 1 ? idxInRound : size - idxInRound + 1;
+}
+
+function totalPicksOf(snap: FplSnapshot): number {
+  if (Number.isFinite(snap.totalPicks) && (snap.totalPicks ?? 0) > 0) {
+    return snap.totalPicks!;
+  }
+  return Math.max(1, snap.size) * FPL_PICKS_PER_MANAGER;
+}
+
+type NextUp = {
+  email: string;
+  teamName: string;
+  outOfDraft: boolean;
+};
+
+function nextUpAfterPick(pick: FplPick, snap: FplSnapshot): NextUp | "done" | null {
+  const total = totalPicksOf(snap);
+  if (pick.pickNumber >= total) return "done";
+
+  const isLatest = pick.pickNumber === snap.maxPickNumber;
+  if (isLatest && snap.status !== "drafting" && !snap.onClock) return "done";
+
+  // Latest pick: whoever the site currently has on the clock (skips already-resolved OOD / GK skips).
+  if (isLatest && snap.onClock) {
+    return {
+      email: snap.onClock.email,
+      teamName: snap.onClock.teamName,
+      outOfDraft: snap.onClock.outOfDraft,
+    };
+  }
+
+  const nextNo = pick.pickNumber + 1;
+  if (nextNo > total) return "done";
+  if (!snap.size) return null;
+  const slot = memberSlotForPick(nextNo, snap.size);
+  const member = snap.members.find((m) => m.draftSlot === slot) ?? null;
+  if (!member) return null;
+  return {
+    email: member.email,
+    teamName: member.teamName,
+    outOfDraft: member.outOfDraft,
+  };
+}
+
+/** HTML pick-log line. Tag if this email is bound to a Telegram user. */
+export function formatNextUpLine(
+  next: NextUp,
+  link: Link | null,
+): string {
+  const label = `«${escapeHtml(next.teamName)}»`;
+  if (link) {
+    return `Следующий: <a href="tg://user?id=${link.telegram_user_id}">${label}</a>`;
+  }
+  return `Следующий: ${label}`;
+}
+
+export function formatFplPickLog(pick: FplPick, nextLine?: string): string {
+  const club = escapeHtml(pick.clubShort || pick.clubName || "?");
+  const lines = [
     `🎯 Пик #${pick.pickNumber} · Раунд ${pick.round}`,
-    `«${pick.teamName}» выбирает:`,
-    `${pick.playerName} · ${pick.position} · ${club}`,
+    `«${escapeHtml(pick.teamName)}» выбирает:`,
+    `${escapeHtml(pick.playerName)} · ${escapeHtml(pick.position)} · ${club}`,
     pick.auto ? "авто" : "ручной",
-  ].join("\n");
+  ];
+  if (nextLine) lines.push(nextLine);
+  return lines.join("\n");
 }
 
 function panenkaOrigin(): string {
@@ -372,17 +449,23 @@ export async function handleFplMessage(
     }
     try {
       await api.sendFplPickLog(
-        formatFplPickLog({
-          pickNumber: 1,
-          round: 1,
-          auto: false,
-          teamName: "тест",
-          email: links[0]!.email,
-          playerName: "Haaland",
-          position: "FWD",
-          clubShort: "MCI",
-          clubName: "Manchester City",
-        }),
+        formatFplPickLog(
+          {
+            pickNumber: 1,
+            round: 1,
+            auto: false,
+            teamName: "тест",
+            email: links[0]!.email,
+            playerName: "Haaland",
+            position: "FWD",
+            clubShort: "MCI",
+            clubName: "Manchester City",
+          },
+          formatNextUpLine(
+            { email: links[0]!.email, teamName: "тест", outOfDraft: false },
+            links[0]!,
+          ),
+        ),
       );
       await api.sendMessage(chatId, "Ок — тестовый лог FPL отправлен в топик.");
     } catch (err) {
@@ -501,7 +584,15 @@ export async function checkFplDraft(
     const fresh = snap.picks.filter((p) => p.pickNumber > last);
     for (const pick of fresh) {
       try {
-        await api.sendFplPickLog(formatFplPickLog(pick));
+        const next = nextUpAfterPick(pick, snap);
+        let nextLine: string | undefined;
+        if (next === "done") {
+          nextLine = "Драфт завершён";
+        } else if (next) {
+          const link = linksForEmail(db, next.email)[0] ?? null;
+          nextLine = formatNextUpLine(next, link);
+        }
+        await api.sendFplPickLog(formatFplPickLog(pick, nextLine));
         setLastLoggedPickNo(db, pick.pickNumber);
         console.log(
           `[fpl-bot] pick-log #${pick.pickNumber} team=${pick.teamName} auto=${pick.auto}`,

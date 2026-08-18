@@ -682,7 +682,7 @@ class TelegramApi {
   sendMessage(
     chatId: number,
     text: string,
-    opts?: { messageThreadId?: number },
+    opts?: { messageThreadId?: number; parseMode?: "HTML" },
   ): Promise<{ message_id: number }> {
     const body: Record<string, unknown> = {
       chat_id: chatId,
@@ -691,6 +691,9 @@ class TelegramApi {
     };
     if (opts?.messageThreadId != null) {
       body.message_thread_id = opts.messageThreadId;
+    }
+    if (opts?.parseMode) {
+      body.parse_mode = opts.parseMode;
     }
     return this.call("sendMessage", body);
   }
@@ -711,6 +714,7 @@ class TelegramApi {
     }
     return this.sendMessage(this.fplPickLogChatId, text, {
       messageThreadId: this.fplPickLogThreadId,
+      parseMode: "HTML",
     });
   }
 
