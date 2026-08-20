@@ -285,7 +285,7 @@ export async function handleH2hMessage(
   const parts = raw.split(/\s+/);
   const cmd = (parts[0] ?? "").toLowerCase().replace(/@\w+$/, "");
 
-  // /start — let Top-4 handler own unless we extend help; only claim /h2h*
+  // /start /help — let Top-4 handler own; only claim /h2h*
   if (cmd === "/h2h") {
     const emailArg = parts[1]?.trim();
     if (emailArg?.includes("@")) {

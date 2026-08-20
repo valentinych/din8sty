@@ -3,16 +3,23 @@
  *
  * Pick logs → forum topic https://t.me/c/2419087266/2
  * Turn pings → DM when a mapped manager goes on the clock.
+ * Deadline reminders → DM (same UX as Top-4 /deadline: 1–3 offsets).
  * Email mapping: fpl_telegram_links ∪ top4_telegram_links ∪ h2h_telegram_links.
  *
  * /fpl — bind panenka email (for managers not already in Top-4 / H2H)
  * /testfpl — sample turn ping
  * /testfpllog — sample pick log to the FPL topic
+ * /fpldeadline — lineup-deadline reminders (1–3 offsets)
+ * /fpldeadline off — disable
+ * /testfpldeadline — sample deadline reminder
  */
 import type Database from "better-sqlite3";
 
 const DRAFT_URL = "https://fantasy.panenka.games/fpl-2026/draft";
+const LINEUP_URL = "https://fantasy.panenka.games/fpl-2026/lineup";
 const PENDING_TTL_MS = 15 * 60_000;
+const WARSAW_TZ = "Europe/Warsaw";
+const DEADLINE_MAX_MINUTES = 14 * 24 * 60;
 
 type TgUser = { id: number; username?: string; first_name?: string };
 type TgChat = { id: number; type: string };
@@ -52,6 +59,11 @@ type FplMember = {
   outOfDraft: boolean;
 };
 
+type FplDeadline = {
+  gw: number;
+  deadline_time: string;
+};
+
 type FplSnapshot = {
   ok?: boolean;
   error?: string;
@@ -70,12 +82,26 @@ type FplSnapshot = {
   } | null;
   picks: FplPick[];
   members: FplMember[];
+  deadline?: FplDeadline | null;
+};
+
+type DeadlineReminderRow = {
+  telegram_user_id: number;
+  chat_id: number;
+  minutes_json: string;
+  last_sent_gw: number | null;
+  last_sent_offsets_json: string;
+  enabled: number;
 };
 
 /** Fallback if an older panenka snapshot omits totalPicks (23 rounds). */
 const FPL_PICKS_PER_MANAGER = 23;
 
 const pendingFpl = new Map<number, { at: number }>();
+const pendingFplDeadline = new Map<
+  number,
+  { step: "count" | "minutes"; count: number; minutes: number[]; at: number }
+>();
 let coverageLogged = false;
 
 const PING_PHRASES = [
@@ -236,6 +262,16 @@ export function ensureFplBotTables(db: Database.Database): void {
       telegram_user_id INTEGER PRIMARY KEY,
       last_notified_pick_no INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS fpl_deadline_reminders (
+      telegram_user_id INTEGER PRIMARY KEY,
+      chat_id INTEGER NOT NULL,
+      minutes_json TEXT NOT NULL,
+      last_sent_gw INTEGER,
+      last_sent_offsets_json TEXT NOT NULL DEFAULT '[]',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 }
 
@@ -365,6 +401,173 @@ function markNotified(
   ).run(telegramUserId, pickNo);
 }
 
+function parseMinutesJson(raw: string): number[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((n) => Number(n))
+      .filter((n) => Number.isInteger(n) && n > 0);
+  } catch {
+    return [];
+  }
+}
+
+function getDeadlineReminder(
+  db: Database.Database,
+  telegramUserId: number,
+): DeadlineReminderRow | null {
+  return (
+    (db
+      .prepare(
+        `SELECT telegram_user_id, chat_id, minutes_json, last_sent_gw,
+                last_sent_offsets_json, enabled
+         FROM fpl_deadline_reminders WHERE telegram_user_id = ?`,
+      )
+      .get(telegramUserId) as DeadlineReminderRow | undefined) ?? null
+  );
+}
+
+function listEnabledDeadlineReminders(db: Database.Database): DeadlineReminderRow[] {
+  return db
+    .prepare(
+      `SELECT telegram_user_id, chat_id, minutes_json, last_sent_gw,
+              last_sent_offsets_json, enabled
+       FROM fpl_deadline_reminders WHERE enabled = 1`,
+    )
+    .all() as DeadlineReminderRow[];
+}
+
+function upsertDeadlineReminder(
+  db: Database.Database,
+  opts: { telegramUserId: number; chatId: number; minutes: number[] },
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO fpl_deadline_reminders
+       (telegram_user_id, chat_id, minutes_json, last_sent_gw,
+        last_sent_offsets_json, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, '[]', 1, ?, ?)
+     ON CONFLICT(telegram_user_id) DO UPDATE SET
+       chat_id = excluded.chat_id,
+       minutes_json = excluded.minutes_json,
+       enabled = 1,
+       updated_at = excluded.updated_at`,
+  ).run(opts.telegramUserId, opts.chatId, JSON.stringify(opts.minutes), now, now);
+}
+
+function disableDeadlineReminder(db: Database.Database, telegramUserId: number): void {
+  db.prepare(
+    `UPDATE fpl_deadline_reminders
+     SET enabled = 0, updated_at = ?
+     WHERE telegram_user_id = ?`,
+  ).run(new Date().toISOString(), telegramUserId);
+}
+
+function markDeadlineSent(
+  db: Database.Database,
+  telegramUserId: number,
+  gw: number,
+  minutes: number,
+): void {
+  const row = getDeadlineReminder(db, telegramUserId);
+  const sent =
+    row && row.last_sent_gw === gw ? parseMinutesJson(row.last_sent_offsets_json) : [];
+  if (!sent.includes(minutes)) sent.push(minutes);
+  db.prepare(
+    `UPDATE fpl_deadline_reminders
+     SET last_sent_gw = ?, last_sent_offsets_json = ?, updated_at = ?
+     WHERE telegram_user_id = ?`,
+  ).run(gw, JSON.stringify(sent), new Date().toISOString(), telegramUserId);
+}
+
+function formatWarsawDeadline(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: WARSAW_TZ,
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  const day = get("day");
+  const month = get("month");
+  const hour = String(get("hour") || "").padStart(2, "0");
+  const minute = String(get("minute") || "").padStart(2, "0");
+  if (!day || !month) return iso;
+  return `${day}.${month} ${hour}:${minute}`;
+}
+
+export function formatFplDeadlineReminderText(opts: {
+  gw: number;
+  deadlineIso: string;
+  teamName: string;
+}): string {
+  const when = formatWarsawDeadline(opts.deadlineIso);
+  const name = opts.teamName.trim() || "FPL";
+  return [
+    "DILDLINE IS COMING",
+    "",
+    `FPL GW${opts.gw} · ${when}`,
+    `«${name}»`,
+    LINEUP_URL,
+  ].join("\n");
+}
+
+function formatMinutesList(minutes: number[]): string {
+  return minutes.join(", ");
+}
+
+function deadlineStatusLine(deadline: FplDeadline | null | undefined): string {
+  if (!deadline?.deadline_time) {
+    return "Дедлайн пока неизвестен.";
+  }
+  return `Следующий дедлайн: GW${deadline.gw} · ${formatWarsawDeadline(deadline.deadline_time)} (Warsaw)`;
+}
+
+function parseCountReply(raw: string): number | null {
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n < 1 || n > 3) return null;
+  return n;
+}
+
+function parseMinutesReply(raw: string): number | null {
+  const m = raw.trim().match(/^(\d+)\s*(?:мин|min|m)?$/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isInteger(n) || n < 1 || n > DEADLINE_MAX_MINUTES) return null;
+  return n;
+}
+
+function isOffReply(raw: string): boolean {
+  const t = raw.trim().toLowerCase();
+  return t === "off" || t === "стоп" || t === "выкл" || t === "выключить";
+}
+
+function memberTeamName(snap: FplSnapshot | null, email: string): string | null {
+  if (!snap) return null;
+  const needle = email.toLowerCase();
+  return snap.members.find((m) => m.email.toLowerCase() === needle)?.teamName ?? null;
+}
+
+function snapshotDeadline(snap: FplSnapshot | null): FplDeadline | null {
+  if (!snap?.deadline?.deadline_time) return null;
+  const ms = Date.parse(snap.deadline.deadline_time);
+  if (!Number.isFinite(ms)) return null;
+  return snap.deadline;
+}
+
+async function fetchSnapshotOrNull(): Promise<FplSnapshot | null> {
+  try {
+    return await fetchSnapshot();
+  } catch {
+    return null;
+  }
+}
+
 /** Seed cursor to current max so first deploy does not backfill-spam old picks. */
 function ensureFplPickLogState(db: Database.Database, maxPick: number): void {
   const existing = db
@@ -399,7 +602,7 @@ function logCoverage(snap: FplSnapshot, db: Database.Database): void {
 }
 
 export function fplHelpLine(): string {
-  return "/fpl — привязать email для пингов хода FPL 2026";
+  return "/fpl — email · /fpldeadline — дедлайн состава";
 }
 
 export async function handleFplMessage(
@@ -420,9 +623,20 @@ export async function handleFplMessage(
   if (pending && Date.now() - pending.at > PENDING_TTL_MS) {
     pendingFpl.delete(userId);
   }
+  const deadlinePending = pendingFplDeadline.get(userId);
+  if (deadlinePending && Date.now() - deadlinePending.at > PENDING_TTL_MS) {
+    pendingFplDeadline.delete(userId);
+  }
+
+  if (cmd === "/start" || cmd === "/help") {
+    pendingFpl.delete(userId);
+    pendingFplDeadline.delete(userId);
+    return false;
+  }
 
   if (cmd === "/testfpl") {
     pendingFpl.delete(userId);
+    pendingFplDeadline.delete(userId);
     const links = linksForEmailFromUser(db, userId);
     if (!links.length) {
       await api.sendMessage(chatId, "Сначала привяжи email: /fpl you@email.com");
@@ -435,6 +649,7 @@ export async function handleFplMessage(
 
   if (cmd === "/testfpllog") {
     pendingFpl.delete(userId);
+    pendingFplDeadline.delete(userId);
     const links = linksForEmailFromUser(db, userId);
     if (!links.length) {
       await api.sendMessage(chatId, "Сначала привяжи email: /fpl you@email.com");
@@ -475,7 +690,92 @@ export async function handleFplMessage(
     return true;
   }
 
+  if (
+    cmd === "/testfpldeadline" ||
+    (cmd === "/testdeadline" &&
+      !hasTop4Link(db, userId) &&
+      linksForEmailFromUser(db, userId).length > 0)
+  ) {
+    pendingFpl.delete(userId);
+    pendingFplDeadline.delete(userId);
+    const links = linksForEmailFromUser(db, userId);
+    if (!links.length) {
+      await api.sendMessage(chatId, "Сначала привяжи email: /fpl you@email.com");
+      return true;
+    }
+    const snap = await fetchSnapshotOrNull();
+    const deadline = snapshotDeadline(snap);
+    const teamName =
+      memberTeamName(snap, links[0]!.email) ?? links[0]!.email;
+    if (!deadline) {
+      await api.sendMessage(
+        chatId,
+        `${deadlineStatusLine(null)}\nПример:\n\n${formatFplDeadlineReminderText({
+          gw: 1,
+          deadlineIso: "2026-08-16T14:00:00.000Z",
+          teamName,
+        })}`,
+      );
+      return true;
+    }
+    await api.sendMessage(
+      chatId,
+      formatFplDeadlineReminderText({
+        gw: deadline.gw,
+        deadlineIso: deadline.deadline_time,
+        teamName,
+      }),
+    );
+    return true;
+  }
+
+  if (
+    cmd === "/fpldeadline" ||
+    cmd === "/fpldildline" ||
+    ((cmd === "/deadline" || cmd === "/dildline") &&
+      !hasTop4Link(db, userId) &&
+      linksForEmailFromUser(db, userId).length > 0)
+  ) {
+    pendingFpl.delete(userId);
+    const links = linksForEmailFromUser(db, userId);
+    if (!links.length) {
+      pendingFplDeadline.delete(userId);
+      await api.sendMessage(chatId, "Сначала привяжи email: /fpl you@email.com");
+      return true;
+    }
+    const rest = parts.slice(1).join(" ").trim();
+    if (isOffReply(rest)) {
+      pendingFplDeadline.delete(userId);
+      disableDeadlineReminder(db, userId);
+      await api.sendMessage(
+        chatId,
+        "Напоминания о дедлайне FPL выключены. /fpldeadline — настроить снова.",
+      );
+      return true;
+    }
+    const existing = getDeadlineReminder(db, userId);
+    const currentMins = existing ? parseMinutesJson(existing.minutes_json) : [];
+    const currentLine = currentMins.length
+      ? `Сейчас${existing && !existing.enabled ? " (выкл)" : ""}: ${currentMins.length}× — за ${formatMinutesList(currentMins)} мин.\n`
+      : "";
+    pendingFplDeadline.set(userId, {
+      step: "count",
+      count: 0,
+      minutes: [],
+      at: Date.now(),
+    });
+    const snap = await fetchSnapshotOrNull();
+    const teamName =
+      memberTeamName(snap, links[0]!.email) ?? links[0]!.email;
+    await api.sendMessage(
+      chatId,
+      `Напоминания о дедлайне состава FPL «${teamName}».\n${currentLine}${deadlineStatusLine(snapshotDeadline(snap))}\n\nСколько напоминаний? Ответь 1, 2 или 3.\nПотом укажешь минуты до дедлайна для каждого (например 1440, 60, 15).\n/fpldeadline off — выключить.`,
+    );
+    return true;
+  }
+
   if (cmd === "/fpl") {
+    pendingFplDeadline.delete(userId);
     const emailArg = parts[1]?.trim();
     if (emailArg?.includes("@")) {
       upsertFplLink(db, {
@@ -486,7 +786,7 @@ export async function handleFplMessage(
       pendingFpl.delete(userId);
       await api.sendMessage(
         chatId,
-        `FPL: привязан ${emailArg.toLowerCase()}.\nБуду писать, когда твой ход.\n${DRAFT_URL}`,
+        `FPL: привязан ${emailArg.toLowerCase()}.\nБуду писать, когда твой ход.\nДедлайн состава: /fpldeadline\n${DRAFT_URL}`,
       );
       return true;
     }
@@ -496,7 +796,7 @@ export async function handleFplMessage(
     if (existing) {
       await api.sendMessage(
         chatId,
-        `FPL уже привязан: ${existing.email}\n/fpl you@email.com — сменить.\n${DRAFT_URL}`,
+        `FPL уже привязан: ${existing.email}\n/fpl you@email.com — сменить.\n/fpldeadline — напоминания дедлайна.\n${DRAFT_URL}`,
       );
       return true;
     }
@@ -505,6 +805,89 @@ export async function handleFplMessage(
     await api.sendMessage(
       chatId,
       "FPL 2026: пришли email аккаунта panenka.games, или:\n/fpl you@email.com",
+    );
+    return true;
+  }
+
+  const liveDeadline = pendingFplDeadline.get(userId);
+  if (liveDeadline) {
+    const links = linksForEmailFromUser(db, userId);
+    if (!links.length) {
+      pendingFplDeadline.delete(userId);
+      await api.sendMessage(chatId, "Сначала привяжи email: /fpl you@email.com");
+      return true;
+    }
+    if (cmd.startsWith("/") && cmd !== "/fpldeadline" && cmd !== "/fpldildline") {
+      pendingFplDeadline.delete(userId);
+      return false;
+    }
+    if (isOffReply(raw)) {
+      pendingFplDeadline.delete(userId);
+      disableDeadlineReminder(db, userId);
+      await api.sendMessage(
+        chatId,
+        "Напоминания о дедлайне FPL выключены. /fpldeadline — настроить снова.",
+      );
+      return true;
+    }
+    if (liveDeadline.step === "count") {
+      const count = parseCountReply(raw);
+      if (count == null) {
+        await api.sendMessage(chatId, "Нужно число 1, 2 или 3. Или /fpldeadline off.");
+        return true;
+      }
+      pendingFplDeadline.set(userId, {
+        step: "minutes",
+        count,
+        minutes: [],
+        at: Date.now(),
+      });
+      await api.sendMessage(
+        chatId,
+        `За сколько минут до дедлайна прислать напоминание 1/${count}?\nЦелое число больше 0, например 60.`,
+      );
+      return true;
+    }
+    const minutes = parseMinutesReply(raw);
+    if (minutes == null) {
+      await api.sendMessage(
+        chatId,
+        `Нужно целое число минут от 1 до ${DEADLINE_MAX_MINUTES} (например 60).`,
+      );
+      return true;
+    }
+    if (liveDeadline.minutes.includes(minutes)) {
+      await api.sendMessage(
+        chatId,
+        `Уже есть напоминание за ${minutes} мин. Укажи другое число минут.`,
+      );
+      return true;
+    }
+    const nextMinutes = [...liveDeadline.minutes, minutes];
+    if (nextMinutes.length < liveDeadline.count) {
+      pendingFplDeadline.set(userId, {
+        step: "minutes",
+        count: liveDeadline.count,
+        minutes: nextMinutes,
+        at: Date.now(),
+      });
+      await api.sendMessage(
+        chatId,
+        `За сколько минут до дедлайна прислать напоминание ${nextMinutes.length + 1}/${liveDeadline.count}?\nУже задано: ${formatMinutesList(nextMinutes)}. Минуты должны быть разными.`,
+      );
+      return true;
+    }
+    const stored = nextMinutes.slice().sort((a, b) => b - a);
+    upsertDeadlineReminder(db, {
+      telegramUserId: userId,
+      chatId,
+      minutes: stored,
+    });
+    pendingFplDeadline.delete(userId);
+    const snap = await fetchSnapshotOrNull();
+    await api.sendMessage(
+      chatId,
+      `Готово: ${stored.length} напоминани${stored.length === 1 ? "е" : "я"} за ${formatMinutesList(stored)} мин до дедлайна FPL.\n${deadlineStatusLine(snapshotDeadline(snap))}\nТекст: «DILDLINE IS COMING».`,
     );
     return true;
   }
@@ -527,7 +910,7 @@ export async function handleFplMessage(
     pendingFpl.delete(userId);
     await api.sendMessage(
       chatId,
-      `FPL: привязан ${raw.toLowerCase()}.\n${DRAFT_URL}`,
+      `FPL: привязан ${raw.toLowerCase()}.\nДедлайн состава: /fpldeadline\n${DRAFT_URL}`,
     );
     return true;
   }
@@ -552,6 +935,17 @@ function linksForEmailFromUser(db: Database.Database, telegramUserId: number): L
     }
   }
   return [];
+}
+
+function hasTop4Link(db: Database.Database, telegramUserId: number): boolean {
+  try {
+    const row = db
+      .prepare(`SELECT 1 FROM top4_telegram_links WHERE telegram_user_id = ?`)
+      .get(telegramUserId);
+    return Boolean(row);
+  } catch {
+    return false;
+  }
 }
 
 export async function checkFplDraft(
@@ -608,33 +1002,88 @@ export async function checkFplDraft(
   }
 
   const onClock = snap.onClock;
-  if (snap.status !== "drafting" || !onClock) return;
-  if (onClock.outOfDraft) return;
-  if (!onClock.email) {
-    console.warn(`[fpl-bot] on-clock has no email team=${onClock.teamName}`);
-    return;
-  }
-
-  const links = linksForEmail(db, onClock.email);
-  if (!links.length) {
-    return;
-  }
-
-  for (const link of links) {
-    if (lastNotifiedPickNo(db, link.telegram_user_id) === onClock.pickNo) {
-      continue;
+  if (snap.status === "drafting" && onClock && !onClock.outOfDraft) {
+    if (!onClock.email) {
+      console.warn(`[fpl-bot] on-clock has no email team=${onClock.teamName}`);
+    } else {
+      const links = linksForEmail(db, onClock.email);
+      for (const link of links) {
+        if (lastNotifiedPickNo(db, link.telegram_user_id) === onClock.pickNo) {
+          continue;
+        }
+        try {
+          await api.sendMessage(link.chat_id, formatFplPingMessage(onClock.teamName));
+          markNotified(db, link.telegram_user_id, onClock.pickNo);
+          console.log(
+            `[fpl-bot] notified user=${link.telegram_user_id} team=${onClock.teamName} pick=#${onClock.pickNo}`,
+          );
+        } catch (err) {
+          console.error(
+            `[fpl-bot] send failed user=${link.telegram_user_id}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
     }
-    try {
-      await api.sendMessage(link.chat_id, formatFplPingMessage(onClock.teamName));
-      markNotified(db, link.telegram_user_id, onClock.pickNo);
-      console.log(
-        `[fpl-bot] notified user=${link.telegram_user_id} team=${onClock.teamName} pick=#${onClock.pickNo}`,
-      );
-    } catch (err) {
-      console.error(
-        `[fpl-bot] send failed user=${link.telegram_user_id}:`,
-        err instanceof Error ? err.message : err,
-      );
+  }
+
+  await checkFplDeadlineReminders(db, api, snap);
+}
+
+async function checkFplDeadlineReminders(
+  db: Database.Database,
+  api: FplTelegramApi,
+  snap: FplSnapshot,
+): Promise<void> {
+  const deadline = snapshotDeadline(snap);
+  if (!deadline) return;
+  const deadlineMs = Date.parse(deadline.deadline_time);
+  if (!Number.isFinite(deadlineMs)) return;
+
+  const rows = listEnabledDeadlineReminders(db);
+  if (!rows.length) return;
+
+  const nowMs = Date.now();
+  if (nowMs >= deadlineMs) return;
+
+  for (const row of rows) {
+    const minutes = parseMinutesJson(row.minutes_json);
+    if (!minutes.length) continue;
+    const link =
+      getFplLink(db, row.telegram_user_id) ??
+      linksForEmailFromUser(db, row.telegram_user_id)[0] ??
+      null;
+    if (!link) continue;
+    const teamName = memberTeamName(snap, link.email);
+    if (!teamName) continue;
+
+    const sent =
+      row.last_sent_gw === deadline.gw
+        ? parseMinutesJson(row.last_sent_offsets_json)
+        : [];
+
+    for (const offset of minutes) {
+      if (sent.includes(offset)) continue;
+      const fireAt = deadlineMs - offset * 60_000;
+      if (nowMs < fireAt) continue;
+      const text = formatFplDeadlineReminderText({
+        gw: deadline.gw,
+        deadlineIso: deadline.deadline_time,
+        teamName,
+      });
+      try {
+        await api.sendMessage(row.chat_id || link.chat_id, text);
+        markDeadlineSent(db, row.telegram_user_id, deadline.gw, offset);
+        sent.push(offset);
+        console.log(
+          `[fpl-bot] deadline reminder user=${row.telegram_user_id} team=${teamName} gw=${deadline.gw} offset=${offset}m`,
+        );
+      } catch (err) {
+        console.error(
+          `[fpl-bot] deadline send failed user=${row.telegram_user_id}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
   }
 }

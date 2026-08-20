@@ -1,10 +1,13 @@
 /**
  * Top-4 live draft Telegram ping bot.
  *
+ * /help — full command list (RU)
+ * /start — short intro + pointer to /help
  * /pihajme — bind Telegram ↔ manager team
  * /testping — sample ping (bound users only, DM)
  * /testlog — sample pick log to the group log chat (bound users)
  * /deadline — lineup-deadline reminders for the bound team (1–3 offsets)
+ * /dildline — alias of /deadline
  * /deadline off — disable deadline reminders
  * /testdeadline — sample deadline reminder (bound users only, DM)
  * Polls draft state; pings when it's your turn and you are not OOD
@@ -12,7 +15,8 @@
  * Also posts every new draft pick to TOP4_PICK_LOG_CHAT_ID + TOP4_PICK_LOG_THREAD_ID
  * (forum topic; structured log only).
  * FPL 2026: pick logs to FPL_PICK_LOG_CHAT_ID + FPL_PICK_LOG_THREAD_ID
- * (default https://t.me/c/2419087266/2) and turn DMs via the same email map.
+ * (default https://t.me/c/2419087266/2), turn DMs via the same email map,
+ * lineup-deadline reminders via /fpldeadline (same 1–3 offsets as /deadline).
  *
  * Token: TOP4_PING_BOT_TOKEN or TELEGRAM_PIHAJME_TOKEN (env / .env — never commit).
  */
@@ -778,6 +782,51 @@ class TelegramApi {
   }
 }
 
+function botHelpText(): string {
+  return [
+    "Бот Din8sty / Пекло.",
+    "",
+    "Топ-4:",
+    "/pihajme — привязать команду",
+    "/deadline · /dildline — напоминания DILDLINE состава (1–3; off — выкл)",
+    "/testping — пробный пинг хода",
+    "/testlog — тестовый лог пика в топик",
+    "/testdeadline — пример напоминания дедлайна",
+    "",
+    "FPL 2026:",
+    "/fpl — привязать email panenka (пинг, когда твой ход)",
+    "/fpldeadline · /fpldildline — напоминания дедлайна состава (1–3; off — выкл)",
+    "/testfpl — пробный пинг хода",
+    "/testfpllog — тестовый лог пика в топик",
+    "/testfpldeadline — пример напоминания дедлайна",
+    "",
+    "H2H:",
+    "/h2h — привязка email и драфт цифрами (0 = назад)",
+    "",
+    "Общие:",
+    "/start — коротко о боте",
+    "/help — все команды",
+  ].join("\n");
+}
+
+function botStartText(): string {
+  return [
+    "Бот Din8sty / Пекло.",
+    "",
+    "Топ-4:",
+    "/pihajme — привязать команду",
+    "/deadline — напоминания DILDLINE состава",
+    "",
+    "FPL 2026:",
+    fplHelpLine(),
+    "",
+    "H2H:",
+    h2hHelpLine(),
+    "",
+    "Все команды: /help",
+  ].join("\n");
+}
+
 async function handleBindFlow(
   db: Database.Database,
   api: TelegramApi,
@@ -790,15 +839,9 @@ async function handleBindFlow(
   const chatId = msg.chat.id;
   const cmd = (text.trim().split(/\s+/)[0] ?? "").toLowerCase().replace(/@\w+$/, "");
 
-  if (cmd === "/start") {
+  if (cmd === "/start" || cmd === "/help") {
     pendingDeadline.delete(userId);
-    await api.sendMessage(
-      chatId,
-      "Бот Din8sty / Пекло.\n\nТоп-4:\n/pihajme — привязать команду\n/testping — пробный пинг\n/deadline — напоминания дедлайна\n\nFPL 2026:\n" +
-        fplHelpLine() +
-        "\n\nH2H:\n" +
-        h2hHelpLine(),
-    );
+    await api.sendMessage(chatId, cmd === "/help" ? botHelpText() : botStartText());
     return true;
   }
 
