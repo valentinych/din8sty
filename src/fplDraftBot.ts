@@ -2,7 +2,8 @@
  * FPL 2026 draft notifications on the Din8sty Telegram bot (same token).
  *
  * Pick logs → forum topic https://t.me/c/2419087266/2
- * Turn pings → DM when a mapped manager goes on the clock.
+ * Transfer logs → same topic (drop/take or skip, then who is next)
+ * Turn pings → DM when a mapped manager goes on the clock (draft or transfer).
  * Deadline reminders → DM (same UX as Top-4 /deadline: 1–3 offsets).
  * Email mapping: fpl_telegram_links ∪ top4_telegram_links ∪ h2h_telegram_links.
  *
@@ -17,6 +18,7 @@ import type Database from "better-sqlite3";
 
 const DRAFT_URL = "https://fantasy.panenka.games/fpl-2026/draft";
 const LINEUP_URL = "https://fantasy.panenka.games/fpl-2026/lineup";
+const TRANSFERS_URL = "https://fantasy.panenka.games/fpl-2026/transfers";
 const PENDING_TTL_MS = 15 * 60_000;
 const WARSAW_TZ = "Europe/Warsaw";
 const DEADLINE_MAX_MINUTES = 14 * 24 * 60;
@@ -64,6 +66,37 @@ type FplDeadline = {
   deadline_time: string;
 };
 
+type FplTransferAction = {
+  id: number;
+  kind: "transfer" | "skip";
+  pass: number;
+  teamName: string;
+  email: string;
+  outPlayerName: string | null;
+  outPosition: string | null;
+  outClubShort: string | null;
+  inPlayerName: string | null;
+  inPosition: string | null;
+  inClubShort: string | null;
+};
+
+type FplTransferOnClock = {
+  email: string;
+  teamName: string;
+  displayName: string;
+  memberId: number;
+  pass: number;
+  turnKey: string;
+};
+
+type FplTransferWindowSnap = {
+  windowId: string;
+  pass: number;
+  totalPasses: number;
+  onClock: FplTransferOnClock | null;
+  actions: FplTransferAction[];
+};
+
 type FplSnapshot = {
   ok?: boolean;
   error?: string;
@@ -83,6 +116,7 @@ type FplSnapshot = {
   picks: FplPick[];
   members: FplMember[];
   deadline?: FplDeadline | null;
+  transferWindow?: FplTransferWindowSnap | null;
 };
 
 type DeadlineReminderRow = {
@@ -134,6 +168,14 @@ export function formatFplPingMessage(teamName?: string | null): string {
     ? `Твоя очередь в драфте FPL 2026 — «${teamName.trim()}»`
     : "Твоя очередь в драфте FPL 2026";
   return `${phrase}\n\n${context}\n${DRAFT_URL}`;
+}
+
+export function formatFplTransferPingMessage(teamName?: string | null): string {
+  const phrase = pickPingPhrase();
+  const context = teamName?.trim()
+    ? `Твоя очередь на трансфер FPL 2026 — «${teamName.trim()}»`
+    : "Твоя очередь на трансфер FPL 2026";
+  return `${phrase}\n\n${context}\n${TRANSFERS_URL}`;
 }
 
 function escapeHtml(s: string): string {
@@ -216,6 +258,41 @@ export function formatFplPickLog(pick: FplPick, nextLine?: string): string {
   return lines.join("\n");
 }
 
+export function formatFplTransferLog(
+  action: FplTransferAction,
+  totalPasses: number,
+  nextLine?: string,
+): string {
+  const pass = `Проход ${action.pass} из ${totalPasses}`;
+  if (action.kind === "skip") {
+    const lines = [
+      `⏭ Пропуск · ${pass}`,
+      `«${escapeHtml(action.teamName)}» пропускает ход`,
+    ];
+    if (nextLine) lines.push(nextLine);
+    return lines.join("\n");
+  }
+  const out = [
+    escapeHtml(action.outPlayerName || "?"),
+    escapeHtml(action.outPosition || "?"),
+    escapeHtml(action.outClubShort || "?"),
+  ].join(" · ");
+  const inn = [
+    escapeHtml(action.inPlayerName || "?"),
+    escapeHtml(action.inPosition || "?"),
+    escapeHtml(action.inClubShort || "?"),
+  ].join(" · ");
+  const lines = [
+    `🔄 Трансфер · ${pass}`,
+    `«${escapeHtml(action.teamName)}» отпускает:`,
+    out,
+    "берёт:",
+    inn,
+  ];
+  if (nextLine) lines.push(nextLine);
+  return lines.join("\n");
+}
+
 function panenkaOrigin(): string {
   return (
     process.env.H2H_BOT_API_ORIGIN?.trim() ||
@@ -261,6 +338,14 @@ export function ensureFplBotTables(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS fpl_notify_state (
       telegram_user_id INTEGER PRIMARY KEY,
       last_notified_pick_no INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS fpl_transfer_bot_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_logged_action_id INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS fpl_transfer_notify_state (
+      telegram_user_id INTEGER PRIMARY KEY,
+      last_turn_key TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS fpl_deadline_reminders (
       telegram_user_id INTEGER PRIMARY KEY,
@@ -399,6 +484,56 @@ function markNotified(
      ON CONFLICT(telegram_user_id) DO UPDATE SET
        last_notified_pick_no = excluded.last_notified_pick_no`,
   ).run(telegramUserId, pickNo);
+}
+
+function getLastLoggedTransferActionId(db: Database.Database): number {
+  const row = db
+    .prepare(`SELECT last_logged_action_id FROM fpl_transfer_bot_state WHERE id = 1`)
+    .get() as { last_logged_action_id: number } | undefined;
+  return row?.last_logged_action_id ?? 0;
+}
+
+function setLastLoggedTransferActionId(db: Database.Database, n: number): void {
+  db.prepare(
+    `INSERT INTO fpl_transfer_bot_state (id, last_logged_action_id) VALUES (1, ?)
+     ON CONFLICT(id) DO UPDATE SET last_logged_action_id = excluded.last_logged_action_id`,
+  ).run(n);
+}
+
+function ensureFplTransferLogState(db: Database.Database, maxActionId: number): void {
+  const existing = db
+    .prepare(`SELECT last_logged_action_id FROM fpl_transfer_bot_state WHERE id = 1`)
+    .get() as { last_logged_action_id: number } | undefined;
+  if (existing) return;
+  setLastLoggedTransferActionId(db, maxActionId);
+  console.log(
+    `[fpl-bot] transfer-log state seeded last_logged_action_id=${maxActionId}`,
+  );
+}
+
+function lastNotifiedTransferKey(
+  db: Database.Database,
+  telegramUserId: number,
+): string {
+  const row = db
+    .prepare(
+      `SELECT last_turn_key FROM fpl_transfer_notify_state WHERE telegram_user_id = ?`,
+    )
+    .get(telegramUserId) as { last_turn_key: string } | undefined;
+  return row?.last_turn_key ?? "";
+}
+
+function markTransferNotified(
+  db: Database.Database,
+  telegramUserId: number,
+  turnKey: string,
+): void {
+  db.prepare(
+    `INSERT INTO fpl_transfer_notify_state (telegram_user_id, last_turn_key)
+     VALUES (?, ?)
+     ON CONFLICT(telegram_user_id) DO UPDATE SET
+       last_turn_key = excluded.last_turn_key`,
+  ).run(telegramUserId, turnKey);
 }
 
 function parseMinutesJson(raw: string): number[] {
@@ -1027,7 +1162,93 @@ export async function checkFplDraft(
     }
   }
 
+  await checkFplTransferWindow(db, api, snap);
+
   await checkFplDeadlineReminders(db, api, snap);
+}
+
+async function checkFplTransferWindow(
+  db: Database.Database,
+  api: FplTelegramApi,
+  snap: FplSnapshot,
+): Promise<void> {
+  const win = snap.transferWindow ?? null;
+  const actions = win?.actions ?? [];
+  const maxActionId = actions.reduce((m, a) => Math.max(m, a.id), 0);
+  ensureFplTransferLogState(db, maxActionId);
+
+  if (api.fplPickLogReady() && win) {
+    let last = getLastLoggedTransferActionId(db);
+    if (maxActionId < last) {
+      setLastLoggedTransferActionId(db, maxActionId);
+      last = maxActionId;
+      console.log(`[fpl-bot] transfer-log cursor reset to ${last}`);
+    }
+    const fresh = actions.filter((a) => a.id > last);
+    const latestId = actions.length > 0 ? actions[actions.length - 1]!.id : 0;
+    for (const action of fresh) {
+      try {
+        let nextLine: string | undefined;
+        if (action.id === latestId) {
+          if (win.onClock) {
+            const link = linksForEmail(db, win.onClock.email)[0] ?? null;
+            nextLine = formatNextUpLine(
+              {
+                email: win.onClock.email,
+                teamName: win.onClock.teamName,
+                outOfDraft: false,
+              },
+              link,
+            );
+          } else {
+            nextLine = "Все проходы в этом окне завершены";
+          }
+        }
+        await api.sendFplPickLog(
+          formatFplTransferLog(action, win.totalPasses, nextLine),
+        );
+        setLastLoggedTransferActionId(db, action.id);
+        console.log(
+          `[fpl-bot] transfer-log ${action.kind} #${action.id} team=${action.teamName}`,
+        );
+      } catch (err) {
+        console.error(
+          `[fpl-bot] transfer-log send failed #${action.id}:`,
+          err instanceof Error ? err.message : err,
+        );
+        break;
+      }
+    }
+  }
+
+  const onClock = win?.onClock ?? null;
+  if (snap.status === "running" && onClock) {
+    if (!onClock.email) {
+      console.warn(`[fpl-bot] transfer on-clock has no email team=${onClock.teamName}`);
+      return;
+    }
+    const links = linksForEmail(db, onClock.email);
+    for (const link of links) {
+      if (lastNotifiedTransferKey(db, link.telegram_user_id) === onClock.turnKey) {
+        continue;
+      }
+      try {
+        await api.sendMessage(
+          link.chat_id,
+          formatFplTransferPingMessage(onClock.teamName),
+        );
+        markTransferNotified(db, link.telegram_user_id, onClock.turnKey);
+        console.log(
+          `[fpl-bot] transfer notified user=${link.telegram_user_id} team=${onClock.teamName} key=${onClock.turnKey}`,
+        );
+      } catch (err) {
+        console.error(
+          `[fpl-bot] transfer send failed user=${link.telegram_user_id}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
 }
 
 async function checkFplDeadlineReminders(
