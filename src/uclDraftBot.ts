@@ -8,8 +8,9 @@
  * Email mapping: ucl_telegram_links ∪ fpl_telegram_links ∪ top4_telegram_links
  * ∪ h2h_telegram_links — a manager bound for any league is reachable here.
  *
- * Turn pings say nothing about clocks: this league drafts without a pick timer
- * or autopick, and the copy must not promise a countdown it cannot honour.
+ * Turn pings quote the pick clock (30 min inside 10:00–20:00 Warsaw, autopick
+ * from the wishlist on timeout) only while the snapshot says it is armed —
+ * the copy must never promise a countdown the league is not running.
  *
  * /ucl (/lch) — bind panenka email
  * /testucl — sample turn ping
@@ -71,6 +72,15 @@ type UclMember = {
   teamName: string;
   displayName: string;
   draftSlot?: number | null;
+  outOfDraft?: boolean;
+};
+
+type UclClock = {
+  armed: boolean;
+  timeoutSec: number;
+  remainingSec: number;
+  bankRemainingSec: number;
+  bankExhausted: boolean;
 };
 
 type UclOnClock = {
@@ -81,6 +91,8 @@ type UclOnClock = {
   round: number;
   redeeming: boolean;
   picksLeft: number;
+  outOfDraft?: boolean;
+  clock?: UclClock | null;
 };
 
 type UclDeadline = {
@@ -183,12 +195,22 @@ function pickPingPhrase(): string {
   return PING_PHRASES[Math.floor(Math.random() * PING_PHRASES.length)]!;
 }
 
+/** «28 мин» / «1 ч 05 мин» — часы показываем только когда они реально есть. */
+function formatDuration(sec: number): string {
+  const total = Math.max(0, Math.round(sec / 60));
+  if (total < 60) return `${total} мин`;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return m === 0 ? `${h} ч` : `${h} ч ${String(m).padStart(2, "0")} мин`;
+}
+
 export function formatUclPingMessage(opts: {
   teamName?: string | null;
   pickNo?: number;
   round?: number;
   redeeming?: boolean;
   picksLeft?: number;
+  clock?: UclClock | null;
 }): string {
   const phrase = pickPingPhrase();
   const team = opts.teamName?.trim();
@@ -203,6 +225,19 @@ export function formatUclPingMessage(opts: {
   }
   if (opts.picksLeft && opts.picksLeft > 1) {
     lines.push(`Подряд твоих пиков: ${opts.picksLeft}`);
+  }
+  // Часы включаются не сразу; пока не взведены — обещать отсчёт нельзя.
+  const clock = opts.clock;
+  if (clock?.armed) {
+    lines.push(
+      `⏱ ${formatDuration(clock.remainingSec)} на пик (часы идут 10:00–20:00, Варшава)`,
+      "Не успеешь — автопик: первый подходящий из вишлиста, иначе лучший свободный",
+    );
+    if (clock.bankExhausted) {
+      lines.push("⚠️ Банк на нуле — после просрочки уйдёшь в автопик до конца драфта");
+    } else {
+      lines.push(`Банк: ${formatDuration(clock.bankRemainingSec)}`);
+    }
   }
   lines.push(DRAFT_URL);
   return lines.join("\n");
@@ -273,6 +308,50 @@ export function formatUclPickLog(pick: UclPick, nextLine?: string): string {
   }
   if (nextLine) lines.push(nextLine);
   return lines.join("\n");
+}
+
+/** Одна строка дайджеста — тот же смысл, что и у живого лога, но в строку. */
+function uclDigestRow(pick: UclPick): string {
+  const who = `«${escapeHtml(pick.teamName)}»`;
+  if (pick.skipped) return `${pick.pickNumber}. ${who} — ⏭ пропуск слота`;
+  const club = escapeHtml(pick.clubShort || pick.clubName || "?");
+  const name = escapeHtml(pick.playerName || "?");
+  const pos = escapeHtml(pick.position || "?");
+  return `${pick.pickNumber}. ${who} — ${name} · ${pos} · ${club}`;
+}
+
+/** Сколько строк влезает в одно сообщение, чтобы не упереться в лимит Telegram. */
+const UCL_DIGEST_MAX_ROWS = 50;
+
+/**
+ * Пачка пиков одним сообщением: догоняем историю, а не пишем по посту на пик.
+ * Возвращает список сообщений — длинная история режется на части.
+ */
+export function formatUclPickDigest(opts: {
+  title: string;
+  lead?: string;
+  picks: UclPick[];
+  tail?: string;
+}): string[] {
+  const rows = [...opts.picks]
+    .sort((a, b) => a.pickNumber - b.pickNumber)
+    .map(uclDigestRow);
+  if (!rows.length) return [];
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < rows.length; i += UCL_DIGEST_MAX_ROWS) {
+    chunks.push(rows.slice(i, i + UCL_DIGEST_MAX_ROWS));
+  }
+
+  return chunks.map((chunk, i) => {
+    const title =
+      chunks.length > 1 ? `${opts.title} (${i + 1}/${chunks.length})` : opts.title;
+    const lines = [title];
+    if (i === 0 && opts.lead) lines.push(opts.lead);
+    lines.push("", ...chunk);
+    if (i === chunks.length - 1 && opts.tail) lines.push("", opts.tail);
+    return lines.join("\n");
+  });
 }
 
 export function formatUclDraftStart(managers: number, totalPicks: number): string {
@@ -463,7 +542,8 @@ export function ensureUclBotTables(db: Database.Database): void {
       last_logged_action_id INTEGER NOT NULL DEFAULT 0,
       last_logged_window_id TEXT NOT NULL DEFAULT '',
       announced_status TEXT NOT NULL DEFAULT '',
-      announced_deadline_matchday INTEGER NOT NULL DEFAULT 0
+      announced_deadline_matchday INTEGER NOT NULL DEFAULT 0,
+      backfill_before_id INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS ucl_notify_state (
       telegram_user_id INTEGER PRIMARY KEY,
@@ -481,6 +561,16 @@ export function ensureUclBotTables(db: Database.Database): void {
       updated_at TEXT NOT NULL
     );
   `);
+  // Ставилась уже после первого деплоя: 0 на существующей строке значит
+  // «догонять нечего», и молчание — правильное поведение по умолчанию.
+  const stateCols = db
+    .prepare(`PRAGMA table_info(ucl_bot_state)`)
+    .all() as Array<{ name: string }>;
+  if (!stateCols.some((c) => c.name === "backfill_before_id")) {
+    db.exec(
+      `ALTER TABLE ucl_bot_state ADD COLUMN backfill_before_id INTEGER NOT NULL DEFAULT 0`,
+    );
+  }
 }
 
 type UclBotState = {
@@ -489,6 +579,8 @@ type UclBotState = {
   last_logged_window_id: string;
   announced_status: string;
   announced_deadline_matchday: number;
+  /** Пики с id ≤ этого ещё не попали в топик; 0 — догонять нечего. */
+  backfill_before_id: number;
 };
 
 const EMPTY_STATE: UclBotState = {
@@ -497,6 +589,7 @@ const EMPTY_STATE: UclBotState = {
   last_logged_window_id: "",
   announced_status: "",
   announced_deadline_matchday: 0,
+  backfill_before_id: 0,
 };
 
 function readState(db: Database.Database): UclBotState | null {
@@ -504,7 +597,7 @@ function readState(db: Database.Database): UclBotState | null {
     (db
       .prepare(
         `SELECT last_logged_pick_id, last_logged_action_id, last_logged_window_id,
-                announced_status, announced_deadline_matchday
+                announced_status, announced_deadline_matchday, backfill_before_id
          FROM ucl_bot_state WHERE id = 1`,
       )
       .get() as UclBotState | undefined) ?? null
@@ -526,21 +619,24 @@ function ensureState(db: Database.Database, snap: UclSnapshot): UclBotState {
     last_logged_window_id: snap.transferWindow?.windowId ?? "",
     announced_status: snap.status,
     announced_deadline_matchday: snap.deadline?.matchday ?? 0,
+    // Всё, что уже случилось до первого запуска, догоним одним дайджестом.
+    backfill_before_id: snap.maxPickId,
   };
   db.prepare(
     `INSERT INTO ucl_bot_state
        (id, last_logged_pick_id, last_logged_action_id, last_logged_window_id,
-        announced_status, announced_deadline_matchday)
-     VALUES (1, ?, ?, ?, ?, ?)`,
+        announced_status, announced_deadline_matchday, backfill_before_id)
+     VALUES (1, ?, ?, ?, ?, ?, ?)`,
   ).run(
     seeded.last_logged_pick_id,
     seeded.last_logged_action_id,
     seeded.last_logged_window_id,
     seeded.announced_status,
     seeded.announced_deadline_matchday,
+    seeded.backfill_before_id,
   );
   console.log(
-    `[ucl-bot] state seeded pick_id=${seeded.last_logged_pick_id} action_id=${seeded.last_logged_action_id} window=${seeded.last_logged_window_id || "—"} status=${seeded.announced_status}`,
+    `[ucl-bot] state seeded pick_id=${seeded.last_logged_pick_id} action_id=${seeded.last_logged_action_id} window=${seeded.last_logged_window_id || "—"} status=${seeded.announced_status} backfill_before=${seeded.backfill_before_id}`,
   );
   return seeded;
 }
@@ -931,7 +1027,13 @@ export async function handleUclMessage(
     const team = memberTeamName(snap, links[0]!.email) ?? links[0]!.email;
     await api.sendMessage(
       chatId,
-      formatUclPingMessage({ teamName: team, pickNo: 1, round: 1 }),
+      formatUclPingMessage({
+        teamName: team,
+        pickNo: snap?.onClock?.pickNo ?? 1,
+        round: snap?.onClock?.round ?? 1,
+        // Часы берём живые, чтобы проба показывала реальный текст.
+        clock: snap?.onClock?.clock ?? null,
+      }),
     );
     return true;
   }
@@ -1218,6 +1320,7 @@ export async function checkUclDraft(
   logCoverage(snap, db);
 
   await announceDraftStatus(db, api, snap);
+  await backfillPickHistory(db, api, snap);
   await logPicks(db, api, snap);
   await pingDraftTurn(db, snap, api);
   await checkTransferWindow(db, api, snap);
@@ -1257,6 +1360,63 @@ async function announceDraftStatus(
   }
 }
 
+/**
+ * Пики, сделанные до того, как бот начал слушать, — одним догоняющим
+ * сообщением. Порог хранится в состоянии, а не выводится из курсора:
+ * курсор к этому моменту уже уехал вперёд на живых пиках, и по нему нельзя
+ * отличить «не логировали» от «уже отправили».
+ */
+async function backfillPickHistory(
+  db: Database.Database,
+  api: UclTelegramApi,
+  snap: UclSnapshot,
+): Promise<void> {
+  if (!api.uclLogReady()) return;
+  const state = readState(db);
+  if (!state || state.backfill_before_id <= 0) return;
+
+  const missed = snap.picks.filter((p) => p.id <= state.backfill_before_id);
+  if (!missed.length) {
+    setState(db, { backfill_before_id: 0 });
+    return;
+  }
+
+  const firstLogged = Math.max(...missed.map((p) => p.pickNumber)) + 1;
+  const messages = formatUclPickDigest({
+    title: "📋 Пики до подключения бота",
+    lead: `Лог включён с пика #${firstLogged} — вот что было раньше.`,
+    picks: missed,
+    tail: DRAFT_URL,
+  });
+  try {
+    for (const text of messages) await api.sendUclLog(text);
+    setState(db, { backfill_before_id: 0 });
+    console.log(
+      `[ucl-bot] history backfilled ${missed.length} pick(s) up to id=${state.backfill_before_id}`,
+    );
+  } catch (err) {
+    // Флаг не гасим — на следующем опросе попробуем ещё раз.
+    console.error(
+      "[ucl-bot] history backfill failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/** Хвост «Следующий: …» по текущему состоянию очереди. */
+function nextUpLine(db: Database.Database, snap: UclSnapshot): string | null {
+  if (snap.draftFinished) return "Драфт завершён";
+  if (!snap.onClock) return null;
+  const link = linksForEmail(db, snap.onClock.email)[0] ?? null;
+  return formatUclNextUpLine(
+    { email: snap.onClock.email, teamName: snap.onClock.teamName },
+    link,
+  );
+}
+
+/** Больше этого числа пропущенных пиков — шлём дайджест, а не пост на каждый. */
+const UCL_DIGEST_MIN_PICKS = 3;
+
 async function logPicks(
   db: Database.Database,
   api: UclTelegramApi,
@@ -1275,22 +1435,34 @@ async function logPicks(
   const fresh = snap.picks.filter((p) => p.id > last);
   if (!fresh.length) return;
 
+  // Бот лежал и вернулся: пачка постов подряд читается как спам.
+  if (fresh.length > UCL_DIGEST_MIN_PICKS) {
+    const messages = formatUclPickDigest({
+      title: "📋 Пропущенные пики",
+      lead: "Бот был офлайн — догоняем лог.",
+      picks: fresh,
+      tail: nextUpLine(db, snap) ?? DRAFT_URL,
+    });
+    try {
+      for (const text of messages) await api.sendUclLog(text);
+      setState(db, { last_logged_pick_id: fresh[fresh.length - 1]!.id });
+      console.log(`[ucl-bot] pick-log digest of ${fresh.length} pick(s)`);
+    } catch (err) {
+      console.error(
+        "[ucl-bot] pick-log digest failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+    return;
+  }
+
   const latestId = fresh[fresh.length - 1]!.id;
   for (const pick of fresh) {
     try {
       // Только у самого свежего пика хвост «Следующий» — для старых записей
       // очередь уже не та, что была в момент пика.
-      let nextLine: string | undefined;
-      if (pick.id === latestId) {
-        if (snap.draftFinished) nextLine = "Драфт завершён";
-        else if (snap.onClock) {
-          const link = linksForEmail(db, snap.onClock.email)[0] ?? null;
-          nextLine = formatUclNextUpLine(
-            { email: snap.onClock.email, teamName: snap.onClock.teamName },
-            link,
-          );
-        }
-      }
+      const nextLine =
+        pick.id === latestId ? (nextUpLine(db, snap) ?? undefined) : undefined;
       await api.sendUclLog(formatUclPickLog(pick, nextLine));
       setState(db, { last_logged_pick_id: pick.id });
       console.log(
@@ -1313,6 +1485,8 @@ async function pingDraftTurn(
 ): Promise<void> {
   const onClock = snap.onClock;
   if (snap.status !== "drafting" || !onClock) return;
+  // Банк кончился — за менеджера пикает автопилот, звать его некуда.
+  if (onClock.outOfDraft) return;
   if (!onClock.email) {
     console.warn(`[ucl-bot] on-clock has no email team=${onClock.teamName}`);
     return;
@@ -1335,6 +1509,7 @@ async function pingDraftTurn(
           round: onClock.round,
           redeeming: onClock.redeeming,
           picksLeft: onClock.picksLeft,
+          clock: onClock.clock,
         }),
       );
       markNotified(db, link.telegram_user_id, onClock.pickNo);
