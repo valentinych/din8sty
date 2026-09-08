@@ -17,6 +17,9 @@
  * FPL 2026: pick logs to FPL_PICK_LOG_CHAT_ID + FPL_PICK_LOG_THREAD_ID
  * (default https://t.me/c/2419087266/2), turn DMs via the same email map,
  * lineup-deadline reminders via /fpldeadline (same 1–3 offsets as /deadline).
+ * Liga prvaka (ЛЧ 2026/27): topic log to UCL_PICK_LOG_CHAT_ID +
+ * UCL_PICK_LOG_THREAD_ID (default https://t.me/c/2419087266/4), turn DMs and
+ * matchday reminders via /ucl and /ucldeadline.
  *
  * Token: TOP4_PING_BOT_TOKEN or TELEGRAM_PIHAJME_TOKEN (env / .env — never commit).
  */
@@ -43,15 +46,39 @@ import {
   h2hHelpLine,
 } from "./h2hDraftBot.js";
 import {
+  checkPekloLcNotifications,
+  ensurePekloLcBotTables,
+  handlePekloLcMessage,
+  pekloLcHelpLine,
+} from "./pekloLcDraftBot.js";
+import {
   checkFplDraft,
   ensureFplBotTables,
   fplHelpLine,
   handleFplMessage,
 } from "./fplDraftBot.js";
+import {
+  checkUclDraft,
+  ensureUclBotTables,
+  handleUclMessage,
+  uclHelpLine,
+} from "./uclDraftBot.js";
+import {
+  ensurePanenkaLinkTables,
+  handlePanenkaMessage,
+  panenkaLinkHelpLine,
+} from "./panenkaLinkBot.js";
+import {
+  ensureTop4TransferSchema,
+  getTransferBotView,
+  TRANSFER_MAX_DUMPS,
+  TRANSFER_MAX_PICKS,
+} from "./top4Transfers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, "..");
 const DRAFT_URL = "https://din8sty.panenka.games/top4.html";
+const TRANSFERS_URL = "https://din8sty.panenka.games/top4/transfers";
 const POLL_MS = Number(process.env.TOP4_PING_POLL_MS ?? 20_000);
 /** Forum topic https://t.me/c/2419087266/3 — prefer env overrides. */
 const DEFAULT_PICK_LOG_CHAT_ID = -1002419087266;
@@ -59,6 +86,9 @@ const DEFAULT_PICK_LOG_THREAD_ID = 3;
 /** FPL 2026 pick logs: https://t.me/c/2419087266/2 */
 const DEFAULT_FPL_PICK_LOG_CHAT_ID = -1002419087266;
 const DEFAULT_FPL_PICK_LOG_THREAD_ID = 2;
+/** Liga prvaka (ЛЧ 2026/27) logs: https://t.me/c/2419087266/4 */
+const DEFAULT_UCL_PICK_LOG_CHAT_ID = -1002419087266;
+const DEFAULT_UCL_PICK_LOG_THREAD_ID = 4;
 const LEAGUE_SHORT: Record<string, string> = {
   GB1: "ENG",
   ES1: "SPA",
@@ -111,6 +141,7 @@ type LinkRow = {
   team_id: number | null;
   team_name: string;
   last_notified_pick_no: number;
+  tg_username: string | null;
 };
 
 type TgUser = { id: number; username?: string; first_name?: string };
@@ -211,6 +242,28 @@ function configuredFplPickLogThreadId(): number {
   return DEFAULT_FPL_PICK_LOG_THREAD_ID;
 }
 
+function configuredUclPickLogChatId(): number {
+  loadDotEnv();
+  const raw = process.env.UCL_PICK_LOG_CHAT_ID?.trim();
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+    console.error(`[ucl-bot] invalid UCL_PICK_LOG_CHAT_ID=${raw}, using default`);
+  }
+  return DEFAULT_UCL_PICK_LOG_CHAT_ID;
+}
+
+function configuredUclPickLogThreadId(): number {
+  loadDotEnv();
+  const raw = process.env.UCL_PICK_LOG_THREAD_ID?.trim();
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) return n;
+    console.error(`[ucl-bot] invalid UCL_PICK_LOG_THREAD_ID=${raw}, using default`);
+  }
+  return DEFAULT_UCL_PICK_LOG_THREAD_ID;
+}
+
 function requireToken(): string {
   loadDotEnv();
   const token =
@@ -232,13 +285,28 @@ function openDb(): Database.Database {
   db.pragma("busy_timeout = 5000");
   ensureTop4Tables(db);
   ensureH2hBotTables(db);
+  ensurePekloLcBotTables(db);
   ensureFplBotTables(db);
+  ensureUclBotTables(db);
+  ensurePanenkaLinkTables(db);
+  ensureTop4TransferSchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS top4_pick_log_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       last_logged_pick_no INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS top4_transfer_log_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_move_id INTEGER NOT NULL DEFAULT 0,
+      last_window_gw INTEGER NOT NULL DEFAULT 0
+    );
   `);
+  const linkCols = db
+    .prepare(`PRAGMA table_info(top4_telegram_links)`)
+    .all() as Array<{ name: string }>;
+  if (!linkCols.some((c) => c.name === "tg_username")) {
+    db.exec(`ALTER TABLE top4_telegram_links ADD COLUMN tg_username TEXT`);
+  }
   return db;
 }
 
@@ -380,7 +448,8 @@ function getLink(db: Database.Database, telegramUserId: number): LinkRow | null 
   return (
     (db
       .prepare(
-        `SELECT telegram_user_id, chat_id, email, team_id, team_name, last_notified_pick_no
+        `SELECT telegram_user_id, chat_id, email, team_id, team_name, last_notified_pick_no,
+                tg_username
          FROM top4_telegram_links WHERE telegram_user_id = ?`,
       )
       .get(telegramUserId) as LinkRow | undefined) ?? null
@@ -390,7 +459,8 @@ function getLink(db: Database.Database, telegramUserId: number): LinkRow | null 
 function listLinksForEmail(db: Database.Database, email: string): LinkRow[] {
   return db
     .prepare(
-      `SELECT telegram_user_id, chat_id, email, team_id, team_name, last_notified_pick_no
+      `SELECT telegram_user_id, chat_id, email, team_id, team_name, last_notified_pick_no,
+              tg_username
        FROM top4_telegram_links WHERE email = ? COLLATE NOCASE`,
     )
     .all(email.toLowerCase()) as LinkRow[];
@@ -404,19 +474,23 @@ function upsertLink(
     email: string;
     teamId: number | null;
     teamName: string;
+    tgUsername?: string | null;
   },
 ): void {
   const now = new Date().toISOString();
+  const uname = opts.tgUsername?.replace(/^@/, "").trim() || null;
   db.prepare(
     `INSERT INTO top4_telegram_links
-       (telegram_user_id, chat_id, email, team_id, team_name, last_notified_pick_no, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+       (telegram_user_id, chat_id, email, team_id, team_name, last_notified_pick_no,
+        created_at, updated_at, tg_username)
+     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
      ON CONFLICT(telegram_user_id) DO UPDATE SET
        chat_id = excluded.chat_id,
        email = excluded.email,
        team_id = excluded.team_id,
        team_name = excluded.team_name,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at,
+       tg_username = COALESCE(excluded.tg_username, top4_telegram_links.tg_username)`,
   ).run(
     opts.telegramUserId,
     opts.chatId,
@@ -425,6 +499,7 @@ function upsertLink(
     opts.teamName,
     now,
     now,
+    uname,
   );
 }
 
@@ -663,6 +738,8 @@ class TelegramApi {
   pickLogThreadId: number | null = null;
   fplPickLogChatId: number | null = null;
   fplPickLogThreadId: number | null = null;
+  uclLogChatId: number | null = null;
+  uclLogThreadId: number | null = null;
 
   constructor(private readonly token: string) {}
 
@@ -703,12 +780,16 @@ class TelegramApi {
   }
 
   /** Structured pick logs go to the forum topic only (never DMs / hurry phrases). */
-  sendPickLog(text: string): Promise<{ message_id: number }> {
+  sendPickLog(
+    text: string,
+    opts?: { parseMode?: "HTML" },
+  ): Promise<{ message_id: number }> {
     if (this.pickLogChatId == null || this.pickLogThreadId == null) {
       return Promise.reject(new Error("pick-log chat/thread not configured"));
     }
     return this.sendMessage(this.pickLogChatId, text, {
       messageThreadId: this.pickLogThreadId,
+      parseMode: opts?.parseMode,
     });
   }
 
@@ -724,6 +805,21 @@ class TelegramApi {
 
   fplPickLogReady(): boolean {
     return this.fplPickLogChatId != null && this.fplPickLogThreadId != null;
+  }
+
+  /** Liga prvaka topic: pick log, draft/window/deadline announcements. */
+  sendUclLog(text: string): Promise<{ message_id: number }> {
+    if (this.uclLogChatId == null || this.uclLogThreadId == null) {
+      return Promise.reject(new Error("ucl log chat/thread not configured"));
+    }
+    return this.sendMessage(this.uclLogChatId, text, {
+      messageThreadId: this.uclLogThreadId,
+      parseMode: "HTML",
+    });
+  }
+
+  uclLogReady(): boolean {
+    return this.uclLogChatId != null && this.uclLogThreadId != null;
   }
 
   getUpdates(offset: number, timeoutSec: number): Promise<TgUpdate[]> {
@@ -780,6 +876,28 @@ class TelegramApi {
       return false;
     }
   }
+
+  async resolveUclLogChat(): Promise<boolean> {
+    const chatId = configuredUclPickLogChatId();
+    const threadId = configuredUclPickLogThreadId();
+    try {
+      if (this.pickLogChatId !== chatId && this.fplPickLogChatId !== chatId) {
+        await this.call<{ id: number }>("getChat", { chat_id: chatId });
+      }
+      this.uclLogChatId = chatId;
+      this.uclLogThreadId = threadId;
+      console.log(`[ucl-bot] topic ok chat_id=${chatId} thread_id=${threadId}`);
+      return true;
+    } catch (err) {
+      this.uclLogChatId = null;
+      this.uclLogThreadId = null;
+      console.error(
+        `[ucl-bot] topic getChat failed chat_id=${chatId} thread_id=${threadId}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return false;
+    }
+  }
 }
 
 function botHelpText(): string {
@@ -800,8 +918,21 @@ function botHelpText(): string {
     "/testfpllog — тестовый лог пика в топик",
     "/testfpldeadline — пример напоминания дедлайна",
     "",
+    "Лига чемпионов 2026/27:",
+    "/ucl · /lch — привязать email panenka (пинг, когда твой ход)",
+    "/ucldeadline · /ucldildline — напоминания о начале тура (1–3; off — выкл)",
+    "/testucl — пробный пинг хода",
+    "/testucllog — тестовый лог пика в топик",
+    "/testucldeadline — пример напоминания о туре",
+    "",
     "H2H:",
     "/h2h — привязка email и драфт цифрами (0 = назад)",
+    "",
+    "Пекло ЛЧ 2026/27:",
+    "/regpeklo — регистрация в драфт групп; пик = код клуба (LIL)",
+    "",
+    "panenka.games:",
+    "/panenka — привязка Telegram к игроку (yes/off/who/N)",
     "",
     "Общие:",
     "/start — коротко о боте",
@@ -820,8 +951,17 @@ function botStartText(): string {
     "FPL 2026:",
     fplHelpLine(),
     "",
+    "Лига чемпионов 2026/27:",
+    uclHelpLine(),
+    "",
     "H2H:",
     h2hHelpLine(),
+    "",
+    "Пекло ЛЧ 2026/27:",
+    pekloLcHelpLine(),
+    "",
+    "panenka.games:",
+    panenkaLinkHelpLine(),
     "",
     "Все команды: /help",
   ].join("\n");
@@ -1085,6 +1225,7 @@ async function handleBindFlow(
     email: team.email,
     teamId: team.team_id,
     teamName: team.team_name,
+    tgUsername: from.username ?? null,
   });
   pendingBind.delete(userId);
   await api.sendMessage(
@@ -1176,6 +1317,182 @@ async function checkDeadlineReminders(
           err instanceof Error ? err.message : err,
         );
       }
+    }
+  }
+}
+
+function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function formatManagerTag(
+  db: Database.Database,
+  email: string,
+  teamName: string,
+): string {
+  const label = `«${escapeHtml(teamName || email)}»`;
+  const links = listLinksForEmail(db, email);
+  const named = links.find((l) => l.tg_username);
+  if (named?.tg_username) return `@${named.tg_username} ${label}`;
+  const any = links[0];
+  if (any) return `<a href="tg://user?id=${any.telegram_user_id}">${label}</a>`;
+  return label;
+}
+
+function ensureTransferLogState(db: Database.Database): {
+  last_move_id: number;
+  last_window_gw: number;
+} {
+  const existing = db
+    .prepare(
+      `SELECT last_move_id, last_window_gw FROM top4_transfer_log_state WHERE id = 1`,
+    )
+    .get() as { last_move_id: number; last_window_gw: number } | undefined;
+  if (existing) return existing;
+  const maxMove = (
+    db.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM top4_transfer_moves`).get() as {
+      m: number;
+    }
+  ).m;
+  const openGw = getTransferBotView(db).window?.after_gw ?? 0;
+  db.prepare(
+    `INSERT INTO top4_transfer_log_state (id, last_move_id, last_window_gw)
+     VALUES (1, ?, ?)`,
+  ).run(maxMove, openGw);
+  console.log(
+    `[top4-ping] transfer-log seeded last_move_id=${maxMove} last_window_gw=${openGw}`,
+  );
+  return { last_move_id: maxMove, last_window_gw: openGw };
+}
+
+function setTransferLogMove(db: Database.Database, moveId: number): void {
+  ensureTransferLogState(db);
+  db.prepare(
+    `UPDATE top4_transfer_log_state SET last_move_id = ? WHERE id = 1`,
+  ).run(moveId);
+}
+
+function setTransferLogWindow(db: Database.Database, gw: number): void {
+  ensureTransferLogState(db);
+  db.prepare(
+    `UPDATE top4_transfer_log_state SET last_window_gw = ? WHERE id = 1`,
+  ).run(gw);
+}
+
+function formatTransferMoveText(
+  db: Database.Database,
+  move: {
+    id: number;
+    round: number;
+    team_id: number;
+    email: string;
+    kind: "dump" | "pick" | "pass";
+    player_id: string | null;
+    player_name: string | null;
+  },
+  teamName: string,
+  dumps: number,
+  picks: number,
+  next: { email: string; name: string } | null,
+  done: boolean,
+): string {
+  const kind =
+    move.kind === "dump" ? "📤 Сброс" : move.kind === "pick" ? "🎯 Пик" : "⏭ Пропуск";
+  const verb =
+    move.kind === "dump"
+      ? "скидывает"
+      : move.kind === "pick"
+        ? "пикает"
+        : "пропускает ход";
+  const lines = [
+    `${kind} · Раунд ${move.round}`,
+    `«${escapeHtml(teamName)}» ${verb}${move.kind === "pass" ? "" : ":"}`,
+  ];
+  if (move.kind !== "pass") {
+    lines.push(escapeHtml(move.player_name || move.player_id || "—"));
+  }
+  lines.push(`Сбросы ${dumps}/${TRANSFER_MAX_DUMPS} · пики ${picks}/${TRANSFER_MAX_PICKS}`);
+  if (done) lines.push("Окно завершено");
+  else if (next) lines.push(`Следующий: ${formatManagerTag(db, next.email, next.name)}`);
+  lines.push(TRANSFERS_URL);
+  return lines.join("\n");
+}
+
+/** Log new transfer-window opens and dump/pick/pass moves to the draft topic. */
+async function checkTransferLogs(
+  db: Database.Database,
+  api: TelegramApi,
+): Promise<void> {
+  if (api.pickLogChatId == null || api.pickLogThreadId == null) return;
+  const state = ensureTransferLogState(db);
+  const view = getTransferBotView(db);
+  const win = view.window;
+  if (win && win.after_gw !== state.last_window_gw) {
+    const clock = win.on_clock;
+    const tag = clock
+      ? formatManagerTag(db, clock.email, clock.name || clock.code || "")
+      : "—";
+    const text = [
+      `🔁 Трансферное окно после GW${win.after_gw} открыто`,
+      `Раунд ${win.round} из ${win.rounds}`,
+      `Следующий: ${tag}`,
+      TRANSFERS_URL,
+    ].join("\n");
+    try {
+      await api.sendPickLog(text, { parseMode: "HTML" });
+      setTransferLogWindow(db, win.after_gw);
+      state.last_window_gw = win.after_gw;
+      console.log(`[top4-ping] transfer-log window GW${win.after_gw}`);
+    } catch (err) {
+      console.error(
+        "[top4-ping] transfer-log window send failed:",
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+  }
+  const fresh = view.moves.filter((m) => m.id > state.last_move_id);
+  if (!fresh.length) return;
+  const lastId = fresh[fresh.length - 1]!.id;
+  const nameByTeam = new Map(view.order.map((t) => [t.team_id, t.name]));
+  for (const move of fresh) {
+    const dumps = view.moves.filter(
+      (x) => x.team_id === move.team_id && x.kind === "dump" && x.id <= move.id,
+    ).length;
+    const picks = view.moves.filter(
+      (x) => x.team_id === move.team_id && x.kind === "pick" && x.id <= move.id,
+    ).length;
+    const resolvedName =
+      nameByTeam.get(move.team_id) ||
+      listLinksForEmail(db, move.email)[0]?.team_name ||
+      move.email;
+    const isLast = move.id === lastId;
+    const next =
+      isLast && win?.status === "open" && win.on_clock
+        ? { email: win.on_clock.email, name: win.on_clock.name || "" }
+        : null;
+    const text = formatTransferMoveText(
+      db,
+      move,
+      resolvedName,
+      dumps,
+      picks,
+      next,
+      Boolean(isLast && win && win.status !== "open"),
+    );
+    try {
+      await api.sendPickLog(text, { parseMode: "HTML" });
+      setTransferLogMove(db, move.id);
+      console.log(`[top4-ping] transfer-log ${move.kind} #${move.id}`);
+    } catch (err) {
+      console.error(
+        `[top4-ping] transfer-log send failed #${move.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+      break;
     }
   }
 }
@@ -1347,6 +1664,7 @@ async function main(): Promise<void> {
   ensurePickLogState(db);
   await api.resolvePickLogChat();
   await api.resolveFplPickLogChat();
+  await api.resolveUclLogChat();
 
   let offset = 0;
   let polling = false;
@@ -1357,10 +1675,13 @@ async function main(): Promise<void> {
     try {
       await checkPickLogs(db, api);
       await checkReplaceLogs(db, api);
+      await checkTransferLogs(db, api);
       await checkTurns(db, api);
       await checkDeadlineReminders(db, api);
       await checkH2hNotifications(db, api);
+      await checkPekloLcNotifications(db, api);
       await checkFplDraft(db, api);
+      await checkUclDraft(db, api);
     } catch (err) {
       console.error("[top4-ping] poll:", err instanceof Error ? err.message : err);
     } finally {
@@ -1381,10 +1702,31 @@ async function main(): Promise<void> {
         const msg = u.message;
         if (!msg?.text || !msg.from) continue;
         try {
-          const handledFpl = await handleFplMessage(db, api, msg, msg.text);
+          const handledPanenka = await handlePanenkaMessage(db, api, msg, msg.text);
+          const handledUcl =
+            !handledPanenka && (await handleUclMessage(db, api, msg, msg.text));
+          const handledFpl =
+            !handledPanenka &&
+            !handledUcl &&
+            (await handleFplMessage(db, api, msg, msg.text));
           const handledH2h =
-            !handledFpl && (await handleH2hMessage(db, api, msg, msg.text));
-          if (!handledFpl && !handledH2h) {
+            !handledPanenka &&
+            !handledUcl &&
+            !handledFpl &&
+            (await handleH2hMessage(db, api, msg, msg.text));
+          const handledPekloLc =
+            !handledPanenka &&
+            !handledUcl &&
+            !handledFpl &&
+            !handledH2h &&
+            (await handlePekloLcMessage(db, api, msg, msg.text));
+          if (
+            !handledPanenka &&
+            !handledUcl &&
+            !handledFpl &&
+            !handledH2h &&
+            !handledPekloLc
+          ) {
             await handleBindFlow(db, api, msg, msg.text);
           }
         } catch (err) {
@@ -1395,7 +1737,7 @@ async function main(): Promise<void> {
           try {
             await api.sendMessage(
               msg.chat.id,
-              "Ошибка. Попробуй /h2h, /fpl или /pihajme.",
+              "Ошибка. Попробуй /regpeklo, /h2h, /fpl, /ucl или /pihajme.",
             );
           } catch {
             /* ignore */
