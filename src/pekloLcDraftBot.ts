@@ -223,7 +223,8 @@ export async function handlePekloLcMessage(
   const from = msg.from;
   if (!from) return false;
   const userId = from.id;
-  const chatId = msg.chat.id;
+  /** Always DM the player — never post to group chats. */
+  const dmId = userId;
   const raw = text.trim();
   const cmd = (raw.split(/\s+/)[0] ?? "")
     .toLowerCase()
@@ -234,23 +235,22 @@ export async function handlePekloLcMessage(
       const res = await apiPost({
         action: "register",
         telegramUserId: userId,
-        chatId,
+        chatId: dmId,
         username: from.username ?? null,
       });
       if (!res.ok) {
-        await api.sendMessage(chatId, String(res.error ?? "Ошибка регистрации"));
+        await api.sendMessage(dmId, String(res.error ?? "Ошибка регистрации"));
         return true;
       }
-      upsertLink(db, userId, chatId);
+      upsertLink(db, userId, dmId);
       const board = res.board as Board;
       await api.sendMessage(
-        chatId,
+        dmId,
         [String(res.message), "", formatSummary(board), "", PAGE_URL].join("\n"),
       );
       if (res.started && board.onClockSeat != null) {
         const targets = (await apiGet("notify")).targets as Array<{
           telegramUserId: number;
-          chatId: number;
           myTurn: boolean;
           board: Board;
           turnKey: string;
@@ -258,28 +258,32 @@ export async function handlePekloLcMessage(
         for (const t of targets) {
           if (!t.myTurn || t.board.groupId !== board.groupId) continue;
           pendingPick.set(t.telegramUserId, { at: Date.now() });
-          await sendTurnBoard(api, t.chatId, t.board);
+          await sendTurnBoard(api, t.telegramUserId, t.board);
           setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
         }
       }
       return true;
     } catch (err) {
       await api.sendMessage(
-        chatId,
+        dmId,
         `Ошибка: ${err instanceof Error ? err.message : String(err)}`,
       );
       return true;
     }
   }
 
-  // Club code pick: 2–4 letters, only if pending / registered and looks like a code
+  // Club code pick: 2–4 letters
   const code = raw.toUpperCase().replace(/[^A-Z]/g, "");
   const looksLikeCode =
     !raw.startsWith("/") && code.length >= 2 && code.length <= 4 && /^[A-Z]+$/.test(code);
 
   if (looksLikeCode) {
+    // Ignore club-code spam in groups unless this user is in the draft
+    if (msg.chat.type !== "private") {
+      const link = getLink(db, userId);
+      if (!link) return false;
+    }
     const link = getLink(db, userId);
-    // Also allow pick without local link if panenka knows them
     try {
       const res = await apiPost({
         action: "pick",
@@ -287,27 +291,25 @@ export async function handlePekloLcMessage(
         clubCode: code,
       });
       if (!res.ok) {
-        // Not our pick flow if "Сначала /regpeklo" and no link — let other handlers try
         const err = String(res.error ?? "");
         if (err.includes("/regpeklo") && !link) return false;
-        await api.sendMessage(chatId, err || "Не удалось пикнуть");
+        await api.sendMessage(dmId, err || "Не удалось пикнуть");
         return true;
       }
-      upsertLink(db, userId, chatId);
+      upsertLink(db, userId, dmId);
       pendingPick.delete(userId);
       const announce = String(res.announce ?? "");
-      const notifyChatIds = (res.notifyChatIds as number[]) ?? [];
+      const notifyUserIds = (res.notifyChatIds as number[]) ?? [];
       const board = res.board as Board;
-      for (const cid of notifyChatIds) {
+      for (const uid of notifyUserIds) {
         try {
-          await api.sendMessage(cid, announce);
+          await api.sendMessage(uid, announce);
         } catch {
           /* ignore */
         }
       }
       if (board.status === "drafting" && board.onClockName) {
         const targets = (await apiGet("notify")).targets as Array<{
-          chatId: number;
           myTurn: boolean;
           board: Board;
           telegramUserId: number;
@@ -316,15 +318,15 @@ export async function handlePekloLcMessage(
         for (const t of targets) {
           if (t.myTurn && t.board.groupId === board.groupId) {
             pendingPick.set(t.telegramUserId, { at: Date.now() });
-            await sendTurnBoard(api, t.chatId, t.board);
+            await sendTurnBoard(api, t.telegramUserId, t.board);
             setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
           }
         }
       } else if (board.status === "complete") {
-        for (const cid of notifyChatIds) {
+        for (const uid of notifyUserIds) {
           try {
             await api.sendMessage(
-              cid,
+              uid,
               `Драфт группы ${board.groupId} завершён.\n${formatSummary(board)}\n${PAGE_URL}`,
             );
           } catch {
@@ -338,11 +340,12 @@ export async function handlePekloLcMessage(
     }
   }
 
-  // Claim bare messages only while waiting for a pick after turn nudge
+  // Claim bare DM messages only while waiting for a pick
+  if (msg.chat.type !== "private") return false;
   const pend = pendingPick.get(userId);
   if (pend && Date.now() - pend.at < PENDING_TTL_MS && !raw.startsWith("/")) {
     await api.sendMessage(
-      chatId,
+      dmId,
       "Пришли трёхбуквенный код клуба из списка (например LIL).",
     );
     return true;
@@ -364,7 +367,6 @@ export async function checkPekloLcNotifications(
   }
   const targets = (data.targets as Array<{
     telegramUserId: number;
-    chatId: number;
     turnKey: string;
     pickKey: string;
     board: Board;
@@ -372,14 +374,15 @@ export async function checkPekloLcNotifications(
   }>) ?? [];
 
   for (const t of targets) {
-    upsertLink(db, t.telegramUserId, t.chatId);
+    const dmId = t.telegramUserId;
+    upsertLink(db, t.telegramUserId, dmId);
     const link = getLink(db, t.telegramUserId);
     if (!link) continue;
 
     if (t.myTurn && link.last_turn_key !== t.turnKey) {
       pendingPick.set(t.telegramUserId, { at: Date.now() });
       try {
-        await sendTurnBoard(api, t.chatId, t.board);
+        await sendTurnBoard(api, dmId, t.board);
         setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
       } catch (err) {
         console.error(
@@ -388,7 +391,6 @@ export async function checkPekloLcNotifications(
         );
       }
     } else if (!t.myTurn && link.last_turn_key !== t.turnKey) {
-      // advance stored key so we don't spam when turn leaves us
       setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
     }
   }
