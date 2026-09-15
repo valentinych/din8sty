@@ -169,7 +169,7 @@ function formatRemaining(board: Board): string {
 function formatSummary(board: Board): string {
   const phaseLabel =
     board.status === "ready"
-      ? "ожидание"
+      ? "старт"
       : board.status === "le"
         ? `ЛЄ ${board.pickIndex}/36`
         : board.status === "lk_queue"
@@ -286,7 +286,7 @@ async function notifyOnClock(
 }
 
 export function pekloLelkHelpLine(): string {
-  return "/reglelk — регистрация в драфт ЛЄ+ЛК 2026/27 (нужен @ник из группы)";
+  return "/reglelk — опционально привязать TG к драфту ЛЄ+ЛК 2026/27 (драфт уже идёт; можно просто прислать код на своём ходу)";
 }
 
 export async function handlePekloLelkMessage(
@@ -299,10 +299,31 @@ export async function handlePekloLelkMessage(
   if (!from) return false;
   const userId = from.id;
   const dmId = userId;
+  const username = from.username ?? null;
   const raw = text.trim();
   const cmd = (raw.split(/\s+/)[0] ?? "")
     .toLowerCase()
     .replace(/@\w+$/, "");
+
+  // Soft-bind on any private message from a roster @nick (no /reglelk required).
+  if (msg.chat.type === "private" && username && !raw.startsWith("/")) {
+    try {
+      const res = await apiPost({
+        action: "register",
+        telegramUserId: userId,
+        chatId: dmId,
+        username,
+      });
+      if (res.ok) {
+        upsertLink(db, userId, dmId);
+        if (res.started) {
+          await notifyOnClock(db, api, (res.board as Board).groupId);
+        }
+      }
+    } catch {
+      /* ignore — pick/lk handlers may still succeed */
+    }
+  }
 
   if (cmd === "/reglelk") {
     try {
@@ -310,7 +331,7 @@ export async function handlePekloLelkMessage(
         action: "register",
         telegramUserId: userId,
         chatId: dmId,
-        username: from.username ?? null,
+        username,
       });
       if (!res.ok) {
         await api.sendMessage(dmId, String(res.error ?? "Ошибка регистрации"));
@@ -341,7 +362,8 @@ export async function handlePekloLelkMessage(
     const pend = pendingTurn.get(userId);
     const likely =
       (pend && pend.kind === "lk_seat" && Date.now() - pend.at < PENDING_TTL_MS) ||
-      !!link;
+      !!link ||
+      (msg.chat.type === "private" && !!username);
     if (msg.chat.type !== "private" && !link) return false;
     if (!likely && msg.chat.type !== "private") return false;
     try {
@@ -349,10 +371,16 @@ export async function handlePekloLelkMessage(
         action: "lk_seat",
         telegramUserId: userId,
         lkSnakeSeat: Number(raw),
+        username,
       });
       if (!res.ok) {
         const err = String(res.error ?? "");
-        if (err.includes("/reglelk") && !link) return false;
+        if (
+          (err.includes("/reglelk") || err.includes("ником из ростера")) &&
+          !link
+        ) {
+          return false;
+        }
         // Not in lk_queue — don't steal digits from other bots
         if (
           err.includes("закончить драфт ЛЄ") ||
@@ -414,10 +442,16 @@ export async function handlePekloLelkMessage(
         action: "pick",
         telegramUserId: userId,
         clubCode: code,
+        username,
       });
       if (!res.ok) {
         const err = String(res.error ?? "");
-        if (err.includes("/reglelk") && !link) return false;
+        if (
+          (err.includes("/reglelk") || err.includes("ником из ростера")) &&
+          !link
+        ) {
+          return false;
+        }
         // Not their LELK turn / wrong phase — let LC handler try
         if (
           err.includes("Сейчас ходит") ||
