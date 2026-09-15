@@ -52,6 +52,12 @@ import {
   pekloLcHelpLine,
 } from "./pekloLcDraftBot.js";
 import {
+  checkPekloLelkNotifications,
+  ensurePekloLelkBotTables,
+  handlePekloLelkMessage,
+  pekloLelkHelpLine,
+} from "./pekloLelkDraftBot.js";
+import {
   checkFplDraft,
   ensureFplBotTables,
   fplHelpLine,
@@ -286,6 +292,7 @@ function openDb(): Database.Database {
   ensureTop4Tables(db);
   ensureH2hBotTables(db);
   ensurePekloLcBotTables(db);
+  ensurePekloLelkBotTables(db);
   ensureFplBotTables(db);
   ensureUclBotTables(db);
   ensurePanenkaLinkTables(db);
@@ -931,6 +938,9 @@ function botHelpText(): string {
     "Пекло ЛЧ 2026/27:",
     "/regpeklo — регистрация в драфт групп; пик = код клуба (LIL)",
     "",
+    "Пекло ЛЄ+ЛК 2026/27:",
+    "/reglelk — регистрация; пик = код клуба; после ЛЄ — цифра 1–6 для змейки ЛК",
+    "",
     "panenka.games:",
     "/panenka — привязка Telegram к игроку (yes/off/who/N)",
     "",
@@ -959,6 +969,9 @@ function botStartText(): string {
     "",
     "Пекло ЛЧ 2026/27:",
     pekloLcHelpLine(),
+    "",
+    "Пекло ЛЄ+ЛК 2026/27:",
+    pekloLelkHelpLine(),
     "",
     "panenka.games:",
     panenkaLinkHelpLine(),
@@ -1680,6 +1693,7 @@ async function main(): Promise<void> {
       await checkDeadlineReminders(db, api);
       await checkH2hNotifications(db, api);
       await checkPekloLcNotifications(db, api);
+      await checkPekloLelkNotifications(db, api);
       await checkFplDraft(db, api);
       await checkUclDraft(db, api);
     } catch (err) {
@@ -1714,17 +1728,25 @@ async function main(): Promise<void> {
             !handledUcl &&
             !handledFpl &&
             (await handleH2hMessage(db, api, msg, msg.text));
+          const handledPekloLelk =
+            !handledPanenka &&
+            !handledUcl &&
+            !handledFpl &&
+            !handledH2h &&
+            (await handlePekloLelkMessage(db, api, msg, msg.text));
           const handledPekloLc =
             !handledPanenka &&
             !handledUcl &&
             !handledFpl &&
             !handledH2h &&
+            !handledPekloLelk &&
             (await handlePekloLcMessage(db, api, msg, msg.text));
           if (
             !handledPanenka &&
             !handledUcl &&
             !handledFpl &&
             !handledH2h &&
+            !handledPekloLelk &&
             !handledPekloLc
           ) {
             await handleBindFlow(db, api, msg, msg.text);
@@ -1737,7 +1759,7 @@ async function main(): Promise<void> {
           try {
             await api.sendMessage(
               msg.chat.id,
-              "Ошибка. Попробуй /regpeklo, /h2h, /fpl, /ucl или /pihajme.",
+              "Ошибка. Попробуй /reglelk, /regpeklo, /h2h, /fpl, /ucl или /pihajme.",
             );
           } catch {
             /* ignore */
