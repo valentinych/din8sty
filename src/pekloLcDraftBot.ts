@@ -175,6 +175,26 @@ function formatSummary(board: Board): string {
   return lines.join("\n");
 }
 
+function russianPickWord(n: number): string {
+  const n100 = Math.abs(n) % 100;
+  const n10 = n100 % 10;
+  if (n100 >= 11 && n100 <= 14) return "пиков";
+  if (n10 === 1) return "пик";
+  if (n10 >= 2 && n10 <= 4) return "пика";
+  return "пиков";
+}
+
+function personalizedAnnounce(
+  announce: string,
+  uid: number,
+  picksUntilByUserId: Record<string, number> | undefined,
+): string {
+  if (!announce || picksUntilByUserId == null) return announce;
+  const n = picksUntilByUserId[uid] ?? picksUntilByUserId[String(uid)];
+  if (typeof n !== "number" || !Number.isFinite(n)) return announce;
+  return `${announce}\nДо тебя: ${n} ${russianPickWord(n)}`;
+}
+
 async function sendTurnBoard(
   api: TelegramApiLike,
   chatId: number,
@@ -301,9 +321,15 @@ export async function handlePekloLcMessage(
       const announce = String(res.announce ?? "");
       const notifyUserIds = (res.notifyChatIds as number[]) ?? [];
       const board = res.board as Board;
+      const picksUntilByUserId = res.picksUntilByUserId as
+        | Record<string, number>
+        | undefined;
       for (const uid of notifyUserIds) {
         try {
-          await api.sendMessage(uid, announce);
+          await api.sendMessage(
+            uid,
+            personalizedAnnounce(announce, uid, picksUntilByUserId),
+          );
         } catch {
           /* ignore */
         }
