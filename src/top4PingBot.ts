@@ -58,6 +58,12 @@ import {
   pekloLelkHelpLine,
 } from "./pekloLelkDraftBot.js";
 import {
+  checkPekloUnlNotifications,
+  ensurePekloUnlBotTables,
+  handlePekloUnlMessage,
+  pekloUnlHelpLine,
+} from "./pekloUnlDraftBot.js";
+import {
   checkFplDraft,
   ensureFplBotTables,
   fplHelpLine,
@@ -293,6 +299,7 @@ function openDb(): Database.Database {
   ensureH2hBotTables(db);
   ensurePekloLcBotTables(db);
   ensurePekloLelkBotTables(db);
+  ensurePekloUnlBotTables(db);
   ensureFplBotTables(db);
   ensureUclBotTables(db);
   ensurePanenkaLinkTables(db);
@@ -972,6 +979,9 @@ function botStartText(): string {
     "",
     "Пекло ЛЄ+ЛК 2026/27:",
     pekloLelkHelpLine(),
+    "",
+    "Пекло Ліга Націй 2026/27:",
+    pekloUnlHelpLine(),
     "",
     "panenka.games:",
     panenkaLinkHelpLine(),
@@ -1694,6 +1704,7 @@ async function main(): Promise<void> {
       await checkH2hNotifications(db, api);
       await checkPekloLcNotifications(db, api);
       await checkPekloLelkNotifications(db, api);
+      await checkPekloUnlNotifications(db, api);
       await checkFplDraft(db, api);
       await checkUclDraft(db, api);
     } catch (err) {
@@ -1728,17 +1739,25 @@ async function main(): Promise<void> {
             !handledUcl &&
             !handledFpl &&
             (await handleH2hMessage(db, api, msg, msg.text));
+          const handledPekloUnl =
+            !handledPanenka &&
+            !handledUcl &&
+            !handledFpl &&
+            !handledH2h &&
+            (await handlePekloUnlMessage(db, api, msg, msg.text));
           const handledPekloLelk =
             !handledPanenka &&
             !handledUcl &&
             !handledFpl &&
             !handledH2h &&
+            !handledPekloUnl &&
             (await handlePekloLelkMessage(db, api, msg, msg.text));
           const handledPekloLc =
             !handledPanenka &&
             !handledUcl &&
             !handledFpl &&
             !handledH2h &&
+            !handledPekloUnl &&
             !handledPekloLelk &&
             (await handlePekloLcMessage(db, api, msg, msg.text));
           if (
@@ -1746,6 +1765,7 @@ async function main(): Promise<void> {
             !handledUcl &&
             !handledFpl &&
             !handledH2h &&
+            !handledPekloUnl &&
             !handledPekloLelk &&
             !handledPekloLc
           ) {
@@ -1759,7 +1779,7 @@ async function main(): Promise<void> {
           try {
             await api.sendMessage(
               msg.chat.id,
-              "Ошибка. Попробуй /reglelk, /regpeklo, /h2h, /fpl, /ucl или /pihajme.",
+              "Ошибка. Попробуй /regunl, /reglelk, /regpeklo, /h2h, /fpl, /ucl или /pihajme.",
             );
           } catch {
             /* ignore */
