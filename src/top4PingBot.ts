@@ -1779,7 +1779,7 @@ async function main(): Promise<void> {
           try {
             await api.sendMessage(
               msg.chat.id,
-              "Ошибка. Попробуй /regunl, /reglelk, /regpeklo, /h2h, /fpl, /ucl или /pihajme.",
+              "Ошибка. Попробуй /reglelk, /regpeklo, /h2h, /fpl, /ucl или /pihajme.",
             );
           } catch {
             /* ignore */

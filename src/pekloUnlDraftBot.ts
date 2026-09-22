@@ -1,8 +1,7 @@
 /**
  * Peklo Ліга Націй 2026/27 national-team draft via @draftmantra_bot.
  *
- * /regunl — register if TG @nick (or id) matches UNL roster
- * On your turn: bot sends 12 football groups; reply with FIFA code (e.g. FRA)
+ * Accounts are pre-bound from LC/LELK. Reply with FIFA code (e.g. FRA) on your turn.
  * Broadcasts each pick + upcoming queue. DM-only. Does not start the draft.
  */
 import type Database from "better-sqlite3";
@@ -262,19 +261,21 @@ async function sendTurnBoard(
   api: TelegramApiLike,
   chatId: number,
   board: Board,
+  turnMessage?: string | null,
 ): Promise<void> {
-  const text = [
+  const text = (turnMessage && turnMessage.trim()) || [
     "Твой ход в драфте Ліги Націй 2026/27.",
     formatSummary(board),
     "",
-    "Группы (код · сборная). ✕ = у тебя уже есть эта группа:",
+    "Кто что взял и что свободно (✕ = у тебя уже есть эта группа):",
     formatRemaining(board, board.onClockSeat),
     "",
     "Ответь кодом, например: FRA",
     PAGE_URL,
   ].join("\n");
-  if (text.length <= 4000) {
-    await api.sendMessage(chatId, text);
+  const withUrl = text.includes(PAGE_URL) ? text : `${text}\n${PAGE_URL}`;
+  if (withUrl.length <= 4000) {
+    await api.sendMessage(chatId, withUrl);
     return;
   }
   const free = (board.footballGroups ?? [])
@@ -288,7 +289,7 @@ async function sendTurnBoard(
       "Твой ход в драфте Ліги Націй 2026/27.",
       formatSummary(board),
       "",
-      "Доступные (без ✕):",
+      "Доступные:",
       free,
       "",
       "Ответь кодом, напр. FRA",
@@ -298,7 +299,7 @@ async function sendTurnBoard(
 }
 
 export function pekloUnlHelpLine(): string {
-  return "/regunl — регистрация в драфт Ліги Націй 2026/27 (нужен @ник из группы; драфт стартует отдельно)";
+  return "Ліга Націй 2026/27 — на своём ходу пришли код сборной (FRA, GER…). Аккаунты уже привязаны с прошлых драфтов.";
 }
 
 function looksLikeUnlCode(raw: string): string | null {
@@ -318,11 +319,12 @@ async function notifyOnClock(
     myTurn: boolean;
     board: Board;
     turnKey: string;
+    turnMessage?: string | null;
   }>;
   for (const t of targets) {
     if (!t.myTurn || t.board.groupId !== groupId) continue;
     pendingPick.set(t.telegramUserId, { at: Date.now() });
-    await sendTurnBoard(api, t.telegramUserId, t.board);
+    await sendTurnBoard(api, t.telegramUserId, t.board, t.turnMessage);
     setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
   }
 }
@@ -343,6 +345,20 @@ export async function handlePekloUnlMessage(
     .toLowerCase()
     .replace(/@\w+$/, "");
 
+  if (msg.chat.type === "private") {
+    try {
+      const res = await apiPost({
+        action: "register",
+        telegramUserId: userId,
+        chatId: dmId,
+        username,
+      });
+      if (res.ok) upsertLink(db, userId, dmId);
+    } catch {
+      /* pick handler may still succeed via pre-bound ids */
+    }
+  }
+
   if (cmd === "/regunl") {
     try {
       const res = await apiPost({
@@ -352,7 +368,7 @@ export async function handlePekloUnlMessage(
         username,
       });
       if (!res.ok) {
-        await api.sendMessage(dmId, String(res.error ?? "Ошибка регистрации"));
+        await api.sendMessage(dmId, String(res.error ?? "Ошибка"));
         return true;
       }
       upsertLink(db, userId, dmId);
@@ -398,7 +414,7 @@ export async function handlePekloUnlMessage(
           return false;
         }
         if (
-          (err.includes("/regunl") || err.includes("ником из ростера")) &&
+          (err.includes("не в списке") || err.includes("не привязан")) &&
           !link
         ) {
           return false;
@@ -421,6 +437,7 @@ export async function handlePekloUnlMessage(
       const picksUntilByUserId = res.picksUntilByUserId as
         | Record<string, number>
         | undefined;
+      const onClockMessage = (res.onClockMessage as string | null) ?? null;
       for (const uid of notifyUserIds) {
         try {
           await api.sendMessage(
@@ -432,7 +449,24 @@ export async function handlePekloUnlMessage(
         }
       }
       if (board.status === "drafting" && board.onClockName) {
-        await notifyOnClock(db, api, board.groupId);
+        const targets = (await apiGet("notify")).targets as Array<{
+          telegramUserId: number;
+          myTurn: boolean;
+          board: Board;
+          turnKey: string;
+          turnMessage?: string | null;
+        }>;
+        for (const t of targets) {
+          if (!t.myTurn || t.board.groupId !== board.groupId) continue;
+          pendingPick.set(t.telegramUserId, { at: Date.now() });
+          await sendTurnBoard(
+            api,
+            t.telegramUserId,
+            t.board,
+            t.turnMessage ?? onClockMessage,
+          );
+          setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
+        }
       } else if (board.status === "complete") {
         for (const uid of notifyUserIds) {
           try {
@@ -481,6 +515,7 @@ export async function checkPekloUnlNotifications(
     pickKey: string;
     board: Board;
     myTurn: boolean;
+    turnMessage?: string | null;
   }>) ?? [];
 
   for (const t of targets) {
@@ -494,7 +529,7 @@ export async function checkPekloUnlNotifications(
     if (t.myTurn && link.last_turn_key !== t.turnKey) {
       pendingPick.set(t.telegramUserId, { at: Date.now() });
       try {
-        await sendTurnBoard(api, dmId, t.board);
+        await sendTurnBoard(api, dmId, t.board, t.turnMessage);
         setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
       } catch (err) {
         console.error(
