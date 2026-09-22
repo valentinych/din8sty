@@ -59,6 +59,7 @@ type Board = {
   groupLabel: string;
   status: string;
   pickIndex: number;
+  picksMade?: number;
   onClockSeat: number | null;
   onClockName: string | null;
   managers: Array<{
@@ -221,7 +222,7 @@ function formatSummary(board: Board): string {
     board.status === "ready"
       ? "ожидает старта"
       : board.status === "drafting"
-        ? `пик ${board.pickIndex}/40`
+        ? `пик ${board.picksMade ?? board.pickIndex}/48`
         : "готово";
   const lines = [`Группа ${board.groupLabel ?? board.groupId} · ${statusLabel}`];
   if (board.onClockName) lines.push(`Ход: ${board.onClockName}`);
