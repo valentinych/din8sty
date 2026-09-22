@@ -1,10 +1,8 @@
 /**
  * H2H draft assistant for the Din8sty Telegram bot (same token as Top-4 ping).
  *
- * /h2h — bind email + draft help
- * /h2h email@x.com — bind panenka H2H account email
- * Numbered match list → pick 1/2 for club → 0 = назад
- * Polls panenka /api/h2h/bot for turn + opponent-pick notifications.
+ * /h2h — paused (no draft DMs until explicitly re-enabled)
+ * Polls for turn + opponent-pick notifications are disabled.
  */
 import type Database from "better-sqlite3";
 
@@ -152,6 +150,12 @@ export function ensureH2hBotTables(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_h2h_telegram_links_email
       ON h2h_telegram_links (email);
   `);
+  // Optional username for LC badges / contact display.
+  try {
+    db.exec(`ALTER TABLE h2h_telegram_links ADD COLUMN tg_username TEXT`);
+  } catch {
+    /* already present */
+  }
 }
 
 function getH2hLink(db: Database.Database, telegramUserId: number): H2hLinkRow | null {
@@ -176,25 +180,56 @@ function listH2hLinks(db: Database.Database): H2hLinkRow[] {
 
 function upsertH2hLink(
   db: Database.Database,
-  opts: { telegramUserId: number; chatId: number; email: string },
+  opts: {
+    telegramUserId: number;
+    chatId: number;
+    email: string;
+    tgUsername?: string | null;
+  },
 ): void {
   const now = new Date().toISOString();
+  const tg = opts.tgUsername?.replace(/^@/, "").trim() || null;
   db.prepare(
     `INSERT INTO h2h_telegram_links
-       (telegram_user_id, chat_id, email, last_turn_key, last_pick_key, created_at, updated_at)
-     VALUES (?, ?, ?, NULL, NULL, ?, ?)
+       (telegram_user_id, chat_id, email, last_turn_key, last_pick_key, created_at, updated_at, tg_username)
+     VALUES (?, ?, ?, NULL, NULL, ?, ?, ?)
      ON CONFLICT(telegram_user_id) DO UPDATE SET
        chat_id = excluded.chat_id,
        email = excluded.email,
-       updated_at = excluded.updated_at`,
-  ).run(opts.telegramUserId, opts.chatId, opts.email.toLowerCase(), now, now);
+       updated_at = excluded.updated_at,
+       tg_username = COALESCE(excluded.tg_username, h2h_telegram_links.tg_username)`,
+  ).run(opts.telegramUserId, opts.chatId, opts.email.toLowerCase(), now, now, tg);
 }
 
-function updateNotifyKeys(
+/** Per-matchup dedupe maps stored as JSON in last_*_key (legacy single key supported). */
+function parseKeyMap(raw: string | null): Record<string, string> {
+  if (!raw) return {};
+  if (raw.startsWith("{")) {
+    try {
+      const o = JSON.parse(raw) as Record<string, unknown>;
+      if (!o || typeof o !== "object" || Array.isArray(o)) return {};
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(o)) {
+        if (typeof v === "string") out[k] = v;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+  const m = /^(\d+):/.exec(raw);
+  return m ? { [m[1]]: raw } : {};
+}
+
+function serializeKeyMap(map: Record<string, string>): string {
+  return JSON.stringify(map);
+}
+
+function updateNotifyKeyMaps(
   db: Database.Database,
   telegramUserId: number,
-  turnKey: string | null,
-  pickKey: string | null,
+  turnMap: Record<string, string> | null,
+  pickMap: Record<string, string> | null,
 ): void {
   db.prepare(
     `UPDATE h2h_telegram_links
@@ -202,7 +237,12 @@ function updateNotifyKeys(
          last_pick_key = COALESCE(?, last_pick_key),
          updated_at = ?
      WHERE telegram_user_id = ?`,
-  ).run(turnKey, pickKey, new Date().toISOString(), telegramUserId);
+  ).run(
+    turnMap ? serializeKeyMap(turnMap) : null,
+    pickMap ? serializeKeyMap(pickMap) : null,
+    new Date().toISOString(),
+    telegramUserId,
+  );
 }
 
 function formatOdds(n: number | null): string {
@@ -285,6 +325,13 @@ export async function handleH2hMessage(
   const parts = raw.split(/\s+/);
   const cmd = (parts[0] ?? "").toLowerCase().replace(/@\w+$/, "");
 
+  // H2H draft DMs off until explicitly re-enabled.
+  if (cmd === "/h2h" || pendingH2h.has(userId)) {
+    pendingH2h.delete(userId);
+    await api.sendMessage(chatId, "Драфт H2H на паузе");
+    return true;
+  }
+
   // /start /help — let Top-4 handler own; only claim /h2h*
   if (cmd === "/h2h") {
     const emailArg = parts[1]?.trim();
@@ -293,6 +340,7 @@ export async function handleH2hMessage(
         telegramUserId: userId,
         chatId,
         email: emailArg,
+        tgUsername: from.username ?? null,
       });
       pendingH2h.delete(userId);
       try {
@@ -374,7 +422,12 @@ export async function handleH2hMessage(
       await api.sendMessage(chatId, "Отменено.");
       return true;
     }
-    upsertH2hLink(db, { telegramUserId: userId, chatId, email: raw });
+    upsertH2hLink(db, {
+      telegramUserId: userId,
+      chatId,
+      email: raw,
+      tgUsername: from.username ?? null,
+    });
     pendingH2h.delete(userId);
     await api.sendMessage(chatId, `Привязан ${raw.toLowerCase()}. Открой /h2h`);
     return true;
@@ -476,77 +529,12 @@ export async function handleH2hMessage(
 }
 
 export async function checkH2hNotifications(
-  db: Database.Database,
-  api: TelegramApiLike,
+  _db: Database.Database,
+  _api: TelegramApiLike,
 ): Promise<void> {
-  if (!botSecret()) return;
-  const links = listH2hLinks(db);
-  for (const link of links) {
-    try {
-      const snap = await botGet("notify", link.email);
-      const items = (snap.items as {
-        matchupId: number;
-        slug: string;
-        myTurn: boolean;
-        turnKey: string;
-        pickKey: string;
-        lastPickSummary: string | null;
-        pickCount: number;
-      }[]) ?? [];
-
-      for (const item of items) {
-        // Opponent (or anyone) made a new pick
-        if (
-          item.pickCount > 0 &&
-          item.pickKey !== link.last_pick_key &&
-          item.lastPickSummary &&
-          !item.lastPickSummary.startsWith("Ты:")
-        ) {
-          await api.sendMessage(
-            link.chat_id,
-            `H2H ${item.slug.toUpperCase()} #${item.matchupId}\n${item.lastPickSummary}` +
-              (item.myTurn ? "\nСейчас твой ход — /h2h" : ""),
-          );
-          updateNotifyKeys(db, link.telegram_user_id, null, item.pickKey);
-          link.last_pick_key = item.pickKey;
-        } else if (item.pickKey !== link.last_pick_key) {
-          updateNotifyKeys(db, link.telegram_user_id, null, item.pickKey);
-          link.last_pick_key = item.pickKey;
-        }
-
-        // Your turn
-        if (item.myTurn && item.turnKey !== link.last_turn_key) {
-          await api.sendMessage(
-            link.chat_id,
-            `Твой ход в H2H ${item.slug.toUpperCase()} (пара #${item.matchupId})!\nОткрой /h2h или ${DRAFT_URL}?gw=${item.slug}&matchup=${item.matchupId}`,
-          );
-          // Also push the board
-          try {
-            const m = await loadPrimaryMatchup(link.email);
-            if (m?.myTurn) {
-              pendingH2h.set(link.telegram_user_id, {
-                step: "pick_match",
-                matchupId: m.matchupId,
-                slug: m.slug,
-                matches: m.undrafted,
-                at: Date.now(),
-              });
-              await sendTurnBoard(api, link.chat_id, m);
-            }
-          } catch {
-            /* ignore board errors */
-          }
-          updateNotifyKeys(db, link.telegram_user_id, item.turnKey, null);
-          link.last_turn_key = item.turnKey;
-        }
-      }
-    } catch (err) {
-      console.error(
-        `[h2h-bot] notify failed user=${link.telegram_user_id}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
+  // H2H draft DMs off until explicitly re-enabled.
+  // Do not poll /api/h2h/bot or send turn boards / "Твой ход" from here.
+  return;
 }
 
 export function h2hHelpLine(): string {
