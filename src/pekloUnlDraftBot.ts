@@ -258,6 +258,40 @@ function personalizedAnnounce(
   return `${announce}\nДо тебя: ${n} ${russianPickWord(n)}`;
 }
 
+function coerceNotifyUserIds(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  const ids = new Set<number>();
+  for (const x of raw) {
+    const n = Number(x);
+    if (Number.isFinite(n) && n > 0) ids.add(n);
+  }
+  return [...ids];
+}
+
+async function dmGroup(
+  db: Database.Database,
+  api: TelegramApiLike,
+  userIds: number[],
+  textFor: (uid: number) => string,
+  kind: string,
+): Promise<void> {
+  if (userIds.length === 0) {
+    console.error(`[peklo-unl] ${kind}: empty notifyChatIds`);
+    return;
+  }
+  for (const uid of userIds) {
+    upsertLink(db, uid, uid);
+    try {
+      await api.sendMessage(uid, textFor(uid));
+    } catch (err) {
+      console.error(
+        `[peklo-unl] ${kind} uid=${uid}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}
+
 async function sendTurnBoard(
   api: TelegramApiLike,
   chatId: number,
@@ -433,22 +467,19 @@ export async function handlePekloUnlMessage(
       upsertLink(db, userId, dmId);
       pendingPick.delete(userId);
       const announce = String(res.announce ?? "");
-      const notifyUserIds = (res.notifyChatIds as number[]) ?? [];
+      const notifyUserIds = coerceNotifyUserIds(res.notifyChatIds);
       const board = res.board as Board;
       const picksUntilByUserId = res.picksUntilByUserId as
         | Record<string, number>
         | undefined;
       const onClockMessage = (res.onClockMessage as string | null) ?? null;
-      for (const uid of notifyUserIds) {
-        try {
-          await api.sendMessage(
-            uid,
-            personalizedAnnounce(announce, uid, picksUntilByUserId),
-          );
-        } catch {
-          /* ignore */
-        }
-      }
+      await dmGroup(
+        db,
+        api,
+        notifyUserIds,
+        (uid) => personalizedAnnounce(announce, uid, picksUntilByUserId),
+        "announce",
+      );
       if (board.status === "drafting" && board.onClockName) {
         const targets = (await apiGet("notify")).targets as Array<{
           telegramUserId: number;
@@ -460,25 +491,30 @@ export async function handlePekloUnlMessage(
         for (const t of targets) {
           if (!t.myTurn || t.board.groupId !== board.groupId) continue;
           pendingPick.set(t.telegramUserId, { at: Date.now() });
-          await sendTurnBoard(
-            api,
-            t.telegramUserId,
-            t.board,
-            t.turnMessage ?? onClockMessage,
-          );
-          setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
-        }
-      } else if (board.status === "complete") {
-        for (const uid of notifyUserIds) {
           try {
-            await api.sendMessage(
-              uid,
-              `Драфт группы ${board.groupLabel ?? board.groupId} завершён.\n${formatSummary(board)}\n${PAGE_URL}`,
+            await sendTurnBoard(
+              api,
+              t.telegramUserId,
+              t.board,
+              t.turnMessage ?? onClockMessage,
             );
-          } catch {
-            /* ignore */
+            setKeys(db, t.telegramUserId, { turnKey: t.turnKey });
+          } catch (err) {
+            console.error(
+              "[peklo-unl] turn board uid=" + t.telegramUserId + ":",
+              err instanceof Error ? err.message : err,
+            );
           }
         }
+      } else if (board.status === "complete") {
+        await dmGroup(
+          db,
+          api,
+          notifyUserIds,
+          (_uid) =>
+            `Драфт группы ${board.groupLabel ?? board.groupId} завершён.\n${formatSummary(board)}\n${PAGE_URL}`,
+          "complete",
+        );
       }
       return true;
     } catch {
