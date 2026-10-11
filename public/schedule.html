@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1c14" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Din8sty" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title data-i18n="schedule.title">Расписание · Din8sty</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=PT+Sans+Narrow:wght@400;700&family=Source+Sans+3:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/sw-register.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main" data-i18n="nav.skip">К содержимому</a>
+    <div class="pitch" aria-hidden="true"></div>
+    <header class="top">
+      <div>
+        <h1 class="brand"><a href="/">Din8sty</a></h1>
+        <p class="tag" data-i18n="tag.scheduleTop4">Расписание · Топ-4 · ENG · SPA · ITA · GER</p>
+      </div>
+      <nav class="main-nav" aria-label="Разделы" data-i18n-aria="nav.aria">
+        <a href="/players" data-i18n="nav.players">Футболисты</a>
+        <a href="/schedule.html" aria-current="page" data-i18n="nav.schedule">Расписание</a>
+        <a href="/top4.html" data-i18n="nav.top4">Топ-4 катка</a>
+        <a href="/top4/rules" data-i18n="nav.rules">Правила</a>
+        <a href="/squad.html" data-i18n="nav.mySquad">Мой состав</a>
+        <a href="/lineup.html?league=top4" data-i18n="nav.lineup">Выставить состав</a>
+      </nav>
+      <div id="lang-switcher-host" class="lang-switcher-host"></div>
+      <div id="auth-bar" class="auth-bar"></div>
+    </header>
+
+    <main id="main" tabindex="-1">
+    <p class="meta" id="meta" data-i18n="common.loading">Загрузка…</p>
+
+    <section class="filters top4-schedule-filters">
+      <label>
+        <span data-i18n="common.gameweek">Gameweek</span>
+        <select id="gameweek">
+          <option value="">Все GW2–43</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="common.league">Лига</span>
+        <select id="league">
+          <option value="" data-i18n-option="common.allTop4">Все Топ-4</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="common.club">Клуб</span>
+        <select id="club">
+          <option value="" data-i18n-option="common.allClubs">Все клубы</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="common.status">Статус</span>
+        <select id="status">
+          <option value="" data-i18n-option="common.all">Все</option>
+          <option value="NS" data-i18n-option="status.NS">Не начался</option>
+          <option value="FT" data-i18n-option="status.FT">Завершён</option>
+          <option value="1H" data-i18n-option="status.1H">1-й тайм</option>
+          <option value="HT" data-i18n-option="status.HT">Перерыв</option>
+          <option value="2H" data-i18n-option="status.2H">2-й тайм</option>
+          <option value="LIVE" data-i18n-option="status.LIVE">Live</option>
+          <option value="PST" data-i18n-option="status.PST">Перенесён</option>
+          <option value="CANC" data-i18n-option="status.CANC">Отменён</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="schedule.xi">XI</span>
+        <select id="xi" title="Команды менеджеров в основе">
+          <option value="" data-i18n-option="schedule.allXi">Все команды</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="schedule.full">FULL</span>
+        <select id="full" title="Команды менеджеров в составе">
+          <option value="" data-i18n-option="schedule.allXi">Все команды</option>
+        </select>
+      </label>
+    </section>
+
+    <div class="table-wrap" id="sched-table-wrap">
+      <table class="fixtures-table" id="sched-table">
+        <thead>
+          <tr>
+            <th data-i18n="common.date">Дата</th>
+            <th>GW</th>
+            <th data-i18n="common.competition">Турнир</th>
+            <th data-i18n="common.roundCol">Тур</th>
+            <th data-i18n="common.homeTeam">Хозяева</th>
+            <th></th>
+            <th data-i18n="common.awayTeam">Гости</th>
+            <th data-i18n="schedule.xi" title="Команды менеджеров, у которых игрок этого матча стоит в основе на GW">XI</th>
+            <th data-i18n="schedule.full" title="Команды менеджеров, у которых в составе есть игрок этого матча">FULL</th>
+            <th data-i18n="common.status">Статус</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    </main>
+
+    <script src="/i18n.js"></script>
+    <script src="/auth.js"></script>
+    <script src="/schedule.js"></script>
+  </body>
+</html>

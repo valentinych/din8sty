@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1c14" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Din8sty" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title data-i18n="index.title">Din8sty · Top-8 UEFA</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=PT+Sans+Narrow:wght@400;700&family=Source+Sans+3:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/sw-register.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main" data-i18n="nav.skip">К содержимому</a>
+    <div class="pitch" aria-hidden="true"></div>
+    <header class="top">
+      <div>
+        <h1 class="brand"><a href="/">Din8sty</a></h1>
+        <p class="tag" data-i18n="tag.index">Fantasy · топ-8 лиг УЕФА</p>
+      </div>
+      <nav class="main-nav" aria-label="Разделы" data-i18n-aria="nav.aria">
+        <a href="/players" aria-current="page" data-i18n="nav.players">Футболисты</a>
+        <a href="/schedule.html" data-i18n="nav.schedule">Расписание</a>
+        <a href="/top4.html" data-i18n="nav.top4">Топ-4 катка</a>
+        <a href="/top4/rules" data-i18n="nav.rules">Правила</a>
+        <a href="/squad.html" data-i18n="nav.mySquad">Мой состав</a>
+        <a href="/lineup.html?league=top4" data-i18n="nav.lineup">Выставить состав</a>
+      </nav>
+      <div id="lang-switcher-host" class="lang-switcher-host"></div>
+      <div id="auth-bar" class="auth-bar"></div>
+      <dl class="stats" id="stats"></dl>
+    </header>
+
+    <main id="main" tabindex="-1">
+    <section class="filters">
+      <label>
+        <span data-i18n="common.league">Лига</span>
+        <select id="league">
+          <option value="" data-i18n-option="common.allLeagues8">Все 8 лиг</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="common.club">Клуб</span>
+        <select id="club">
+          <option value="" data-i18n-option="common.allClubs">Все клубы</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="common.lineScheme">Линии схемы</span>
+        <select id="line">
+          <option value="" data-i18n-option="common.all">Все</option>
+          <option value="GK">GK</option>
+          <option value="DEF">DEF</option>
+          <option value="MID">MID</option>
+          <option value="ATT">ATT</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="common.position">Позиция</span>
+        <select id="pos">
+          <option value="" data-i18n-option="common.all">Все</option>
+        </select>
+      </label>
+      <label>
+        <span data-i18n="common.sort">Сортировка</span>
+        <select id="sort">
+          <option value="value-desc" data-i18n-option="index.sortValue">Стоимость ↓</option>
+          <option value="rating-desc" data-i18n-option="index.sortRating">FM Rating ↓</option>
+          <option value="wage-desc" data-i18n-option="index.sortWage">Wage ↓</option>
+          <option value="fp-desc" data-i18n-option="index.sortFp">FP ↓</option>
+          <option value="fp-asc" data-i18n-option="index.sortFpAsc">FP ↑</option>
+          <option value="age-asc" data-i18n-option="index.sortAge">Возраст ↑</option>
+          <option value="name" data-i18n-option="index.sortName">Имя</option>
+        </select>
+      </label>
+      <label class="checkbox-filter">
+        <input type="checkbox" id="hide-picked" />
+        <span data-i18n="index.hidePicked">Скрыть пикнутых</span>
+      </label>
+      <label class="checkbox-filter">
+        <input type="checkbox" id="hide-non-top4" />
+        <span data-i18n="index.hideNonTop4">Скрыть не ТОП-4</span>
+      </label>
+      <label class="grow">
+        <span data-i18n="common.search">Поиск</span>
+        <input id="q" type="search" placeholder="Игрок, клуб, национальность" data-i18n-placeholder="index.searchPh" />
+      </label>
+    </section>
+
+    <p class="meta" id="meta"></p>
+    <div class="index-refresh-bar">
+      <span class="lu-refresh-wrap">
+        <button type="button" class="auth-btn lu-btn-secondary" id="index-refresh" hidden data-i18n="index.refresh">
+          Обновить информацию
+        </button>
+        <span class="lu-refreshed" id="index-refreshed"></span>
+      </span>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th data-i18n="common.player">Игрок</th>
+            <th data-i18n="common.club">Клуб</th>
+            <th data-i18n="index.draftCol" data-i18n-title="index.draftColTip">Драфт</th>
+            <th
+              class="sortable"
+              data-sort="fp"
+              data-i18n="index.fpCol"
+              data-i18n-title="index.fpColTip"
+            >
+              FP
+            </th>
+            <th data-i18n="common.league">Лига</th>
+            <th data-i18n="common.posShort">Поз</th>
+            <th data-i18n="common.age">Возр</th>
+            <th data-i18n="common.value">Стоимость</th>
+            <th title="FMInside Current Ability">Rating</th>
+            <th title="FMInside Potential Ability">Pot</th>
+            <th title="Trusted weekly wage (Capology → FM → league peers → €500)">Wage</th>
+            <th title="FMInside wage per week">FM p/w</th>
+            <th title="Capology weekly wage (EUR)">Capology p/w</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    </main>
+
+    <script src="/i18n.js"></script>
+    <script src="/auth.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

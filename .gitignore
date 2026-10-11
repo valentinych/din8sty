@@ -1,0 +1,15 @@
+node_modules/
+__pycache__/
+*.pyc
+din8sty.db
+din8sty.db-*
+.tmp-*
+data/*
+!data/uploads/
+!data/uploads/top4-logos/
+!data/uploads/top4-logos/.gitkeep
+.DS_Store
+dist/
+.env
+.env.bot
+.env.local

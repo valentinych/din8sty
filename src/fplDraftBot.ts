@@ -2,6 +2,7 @@
  * FPL 2026 draft notifications on the Din8sty Telegram bot (same token).
  *
  * Pick logs → forum topic https://t.me/c/2419087266/2
+ * Transfer window open → same topic once per windowId, then DM first on the clock.
  * Transfer logs → same topic (drop/take or skip, then who is next)
  * Turn pings → DM when a mapped manager goes on the clock (draft or transfer).
  * Deadline reminders → DM (same UX as Top-4 /deadline: 1–3 offsets).
@@ -39,7 +40,12 @@ export type FplTelegramApi = {
   fplPickLogReady: () => boolean;
 };
 
-type Link = { telegram_user_id: number; chat_id: number; email: string };
+type Link = {
+  telegram_user_id: number;
+  chat_id: number;
+  email: string;
+  tg_username?: string | null;
+};
 
 type FplPick = {
   pickNumber: number;
@@ -240,10 +246,55 @@ export function formatNextUpLine(
   link: Link | null,
 ): string {
   const label = `«${escapeHtml(next.teamName)}»`;
+  const uname = link?.tg_username?.replace(/^@/, "").trim();
+  if (uname) {
+    return `Следующий: @${escapeHtml(uname)} ${label}`;
+  }
   if (link) {
     return `Следующий: <a href="tg://user?id=${link.telegram_user_id}">${label}</a>`;
   }
   return `Следующий: ${label}`;
+}
+
+function gwBeforeFromWindowId(windowId: string): number | null {
+  const m = windowId.match(/before-gw-(\d+)/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function formatFplTransferPassQuota(n: number): string {
+  const abs = Math.abs(n);
+  const mod10 = abs % 10;
+  const mod100 = abs % 100;
+  let word = "проходов";
+  if (mod10 === 1 && mod100 !== 11) word = "проход";
+  else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+    word = "прохода";
+  }
+  return `${n} ${word} по одному трансферу`;
+}
+
+/** HTML topic post when a transfer window first appears in the snapshot. */
+export function formatFplTransferWindowOpen(opts: {
+  windowId: string;
+  pass: number;
+  totalPasses: number;
+  nextLine?: string;
+}): string {
+  const gw = gwBeforeFromWindowId(opts.windowId);
+  const title = gw
+    ? `🔁 Трансферное окно перед GW${gw} открыто`
+    : "🔁 Трансферное окно открыто";
+  const lines = [
+    title,
+    formatFplTransferPassQuota(opts.totalPasses),
+    "Порядок: с последнего места в таблице к лидеру",
+    `Проход ${opts.pass} из ${opts.totalPasses}`,
+  ];
+  if (opts.nextLine) lines.push(opts.nextLine);
+  lines.push(TRANSFERS_URL);
+  return lines.join("\n");
 }
 
 export function formatFplPickLog(pick: FplPick, nextLine?: string): string {
@@ -326,6 +377,7 @@ export function ensureFplBotTables(db: Database.Database): void {
       telegram_user_id INTEGER PRIMARY KEY,
       chat_id INTEGER NOT NULL,
       email TEXT NOT NULL,
+      tg_username TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -341,7 +393,8 @@ export function ensureFplBotTables(db: Database.Database): void {
     );
     CREATE TABLE IF NOT EXISTS fpl_transfer_bot_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
-      last_logged_action_id INTEGER NOT NULL DEFAULT 0
+      last_logged_action_id INTEGER NOT NULL DEFAULT 0,
+      last_logged_window_id TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS fpl_transfer_notify_state (
       telegram_user_id INTEGER PRIMARY KEY,
@@ -358,13 +411,28 @@ export function ensureFplBotTables(db: Database.Database): void {
       updated_at TEXT NOT NULL
     );
   `);
+  const linkCols = db
+    .prepare(`PRAGMA table_info(fpl_telegram_links)`)
+    .all() as Array<{ name: string }>;
+  if (!linkCols.some((c) => c.name === "tg_username")) {
+    db.exec(`ALTER TABLE fpl_telegram_links ADD COLUMN tg_username TEXT`);
+  }
+  const transferCols = db
+    .prepare(`PRAGMA table_info(fpl_transfer_bot_state)`)
+    .all() as Array<{ name: string }>;
+  if (!transferCols.some((c) => c.name === "last_logged_window_id")) {
+    db.exec(
+      `ALTER TABLE fpl_transfer_bot_state
+       ADD COLUMN last_logged_window_id TEXT NOT NULL DEFAULT ''`,
+    );
+  }
 }
 
 function getFplLink(db: Database.Database, telegramUserId: number): Link | null {
   return (
     (db
       .prepare(
-        `SELECT telegram_user_id, chat_id, email FROM fpl_telegram_links
+        `SELECT telegram_user_id, chat_id, email, tg_username FROM fpl_telegram_links
          WHERE telegram_user_id = ?`,
       )
       .get(telegramUserId) as Link | undefined) ?? null
@@ -373,18 +441,32 @@ function getFplLink(db: Database.Database, telegramUserId: number): Link | null 
 
 function upsertFplLink(
   db: Database.Database,
-  opts: { telegramUserId: number; chatId: number; email: string },
+  opts: {
+    telegramUserId: number;
+    chatId: number;
+    email: string;
+    tgUsername?: string | null;
+  },
 ): void {
   const now = new Date().toISOString();
+  const uname = opts.tgUsername?.replace(/^@/, "").trim() || null;
   db.prepare(
     `INSERT INTO fpl_telegram_links
-       (telegram_user_id, chat_id, email, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+       (telegram_user_id, chat_id, email, tg_username, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(telegram_user_id) DO UPDATE SET
        chat_id = excluded.chat_id,
        email = excluded.email,
+       tg_username = COALESCE(excluded.tg_username, fpl_telegram_links.tg_username),
        updated_at = excluded.updated_at`,
-  ).run(opts.telegramUserId, opts.chatId, opts.email.toLowerCase(), now, now);
+  ).run(
+    opts.telegramUserId,
+    opts.chatId,
+    opts.email.toLowerCase(),
+    uname,
+    now,
+    now,
+  );
 }
 
 function queryLinksByEmail(
@@ -392,12 +474,41 @@ function queryLinksByEmail(
   table: string,
   email: string,
 ): Link[] {
-  return db
-    .prepare(
-      `SELECT telegram_user_id, chat_id, email FROM ${table}
-       WHERE email = ? COLLATE NOCASE`,
-    )
-    .all(email.toLowerCase()) as Link[];
+  try {
+    return db
+      .prepare(
+        `SELECT telegram_user_id, chat_id, email, tg_username FROM ${table}
+         WHERE email = ? COLLATE NOCASE`,
+      )
+      .all(email.toLowerCase()) as Link[];
+  } catch {
+    return db
+      .prepare(
+        `SELECT telegram_user_id, chat_id, email FROM ${table}
+         WHERE email = ? COLLATE NOCASE`,
+      )
+      .all(email.toLowerCase()) as Link[];
+  }
+}
+
+function tgUsernameOf(
+  db: Database.Database,
+  telegramUserId: number,
+): string | null {
+  for (const table of ["fpl_telegram_links", "top4_telegram_links"]) {
+    try {
+      const row = db
+        .prepare(
+          `SELECT tg_username FROM ${table} WHERE telegram_user_id = ?`,
+        )
+        .get(telegramUserId) as { tg_username: string | null } | undefined;
+      const u = row?.tg_username?.replace(/^@/, "").trim();
+      if (u) return u;
+    } catch {
+      /* column or table may not exist */
+    }
+  }
+  return null;
 }
 
 /** Union of FPL / Top-4 / H2H binds for this email (unique telegram user). */
@@ -418,7 +529,10 @@ function linksForEmail(db: Database.Database, email: string): Link[] {
     for (const row of rows) {
       if (seen.has(row.telegram_user_id)) continue;
       seen.add(row.telegram_user_id);
-      out.push(row);
+      out.push({
+        ...row,
+        tg_username: row.tg_username || tgUsernameOf(db, row.telegram_user_id),
+      });
     }
   }
   return out;
@@ -498,6 +612,21 @@ function setLastLoggedTransferActionId(db: Database.Database, n: number): void {
     `INSERT INTO fpl_transfer_bot_state (id, last_logged_action_id) VALUES (1, ?)
      ON CONFLICT(id) DO UPDATE SET last_logged_action_id = excluded.last_logged_action_id`,
   ).run(n);
+}
+
+function getLastLoggedWindowId(db: Database.Database): string {
+  const row = db
+    .prepare(`SELECT last_logged_window_id FROM fpl_transfer_bot_state WHERE id = 1`)
+    .get() as { last_logged_window_id: string } | undefined;
+  return row?.last_logged_window_id ?? "";
+}
+
+function setLastLoggedWindowId(db: Database.Database, windowId: string): void {
+  db.prepare(
+    `INSERT INTO fpl_transfer_bot_state (id, last_logged_action_id, last_logged_window_id)
+     VALUES (1, 0, ?)
+     ON CONFLICT(id) DO UPDATE SET last_logged_window_id = excluded.last_logged_window_id`,
+  ).run(windowId);
 }
 
 function ensureFplTransferLogState(db: Database.Database, maxActionId: number): void {
@@ -917,6 +1046,7 @@ export async function handleFplMessage(
         telegramUserId: userId,
         chatId,
         email: emailArg,
+        tgUsername: from.username,
       });
       pendingFpl.delete(userId);
       await api.sendMessage(
@@ -1041,7 +1171,12 @@ export async function handleFplMessage(
       await api.sendMessage(chatId, "Нужен email, например name@gmail.com (или 0 = отмена)");
       return true;
     }
-    upsertFplLink(db, { telegramUserId: userId, chatId, email: raw });
+    upsertFplLink(db, {
+      telegramUserId: userId,
+      chatId,
+      email: raw,
+      tgUsername: from.username,
+    });
     pendingFpl.delete(userId);
     await api.sendMessage(
       chatId,
@@ -1178,6 +1313,41 @@ async function checkFplTransferWindow(
   ensureFplTransferLogState(db, maxActionId);
 
   if (api.fplPickLogReady() && win) {
+    const lastWindowId = getLastLoggedWindowId(db);
+    if (win.windowId !== lastWindowId) {
+      try {
+        let nextLine: string;
+        if (win.onClock) {
+          const link = linksForEmail(db, win.onClock.email)[0] ?? null;
+          nextLine = formatNextUpLine(
+            {
+              email: win.onClock.email,
+              teamName: win.onClock.teamName,
+              outOfDraft: false,
+            },
+            link,
+          );
+        } else {
+          nextLine = "Все проходы в этом окне завершены";
+        }
+        await api.sendFplPickLog(
+          formatFplTransferWindowOpen({
+            windowId: win.windowId,
+            pass: win.pass,
+            totalPasses: win.totalPasses,
+            nextLine,
+          }),
+        );
+        setLastLoggedWindowId(db, win.windowId);
+        console.log(`[fpl-bot] transfer-window-open ${win.windowId}`);
+      } catch (err) {
+        console.error(
+          `[fpl-bot] transfer-window-open send failed ${win.windowId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
     let last = getLastLoggedTransferActionId(db);
     if (maxActionId < last) {
       setLastLoggedTransferActionId(db, maxActionId);
@@ -1228,6 +1398,12 @@ async function checkFplTransferWindow(
       return;
     }
     const links = linksForEmail(db, onClock.email);
+    if (!links.length) {
+      console.warn(
+        `[fpl-bot] transfer on-clock unbound team=${onClock.teamName} email=${onClock.email} — topic announced, no DM`,
+      );
+      return;
+    }
     for (const link of links) {
       if (lastNotifiedTransferKey(db, link.telegram_user_id) === onClock.turnKey) {
         continue;
@@ -1242,10 +1418,14 @@ async function checkFplTransferWindow(
           `[fpl-bot] transfer notified user=${link.telegram_user_id} team=${onClock.teamName} key=${onClock.turnKey}`,
         );
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         console.error(
           `[fpl-bot] transfer send failed user=${link.telegram_user_id}:`,
-          err instanceof Error ? err.message : err,
+          msg,
         );
+        if (/can't initiate conversation|bot was blocked/i.test(msg)) {
+          markTransferNotified(db, link.telegram_user_id, onClock.turnKey);
+        }
       }
     }
   }

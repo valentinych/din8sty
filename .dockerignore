@@ -1,0 +1,11 @@
+node_modules
+.git
+data/*.db-shm
+data/*.db-wal
+data/fminside_raw.json
+data/fminside_club_map.json
+data/scrape.log
+*.md
+.DS_Store
+.env
+dist

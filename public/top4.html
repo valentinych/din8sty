@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1c14" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Din8sty" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title data-i18n="top4.title">Топ-4 катка · Din8sty</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=PT+Sans+Narrow:wght@400;700&family=Source+Sans+3:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+    <script>
+      (function () {
+        if (!/\/top4\.html$/.test(location.pathname)) return;
+        var t = new URLSearchParams(location.search).get("tab");
+        if (!t) return;
+        var map = {
+          schedule: "/top4/schedule",
+          rules: "/top4/rules",
+          season2526: "/top4/season",
+          season: "/top4/season",
+          "season-2026": "/top4/season-2026",
+          season2627: "/top4/season-2026",
+          "draft-room": "/top4/draft-room",
+          draftRoom: "/top4/draft-room",
+          squads: "/top4/squads",
+          stats: "/top4/stats",
+          statistics: "/top4/stats",
+          results: "/top4/results",
+          live: "/top4/live",
+          "live-standing": "/top4/live",
+          transfers: "/top4/transfers",
+          gws: "/top4/gws",
+        };
+        var dest = map[t];
+        if (!dest) return;
+        var u = new URL(dest, location.origin);
+        new URLSearchParams(location.search).forEach(function (v, k) {
+          if (k !== "tab") u.searchParams.set(k, v);
+        });
+        location.replace(u.pathname + u.search + location.hash);
+      })();
+    </script>
+    <script src="/sw-register.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main" data-i18n="nav.skip">К содержимому</a>
+    <div id="top4-to-banner" class="top4-to-banner" hidden></div>
+    <div class="pitch" aria-hidden="true"></div>
+    <header class="top">
+      <div>
+        <h1 class="brand"><a href="/">Din8sty</a></h1>
+        <p class="tag" data-i18n="tag.top4">Топ-4 катка · ENG · SPA · ITA · GER</p>
+      </div>
+      <nav class="main-nav" aria-label="Разделы" data-i18n-aria="nav.aria">
+        <a href="/players" data-i18n="nav.players">Футболисты</a>
+        <a href="/schedule.html" data-i18n="nav.schedule">Расписание</a>
+        <a href="/top4.html" aria-current="page" data-i18n="nav.top4">Топ-4 катка</a>
+        <a href="/top4/rules" data-i18n="nav.rules">Правила</a>
+        <a href="/squad.html" data-i18n="nav.mySquad">Мой состав</a>
+        <a href="/lineup.html?league=top4" data-i18n="nav.lineup">Выставить состав</a>
+      </nav>
+      <div id="lang-switcher-host" class="lang-switcher-host"></div>
+      <div id="auth-bar" class="auth-bar"></div>
+    </header>
+
+    <nav class="primer-tabs" id="top4-tabs" aria-label="Разделы Топ-4" data-i18n-aria="league.tabsAria4">
+      <a href="/top4.html" class="primer-tab active" data-tab="draft" aria-current="page" data-i18n="league.tab.draft">Драфт</a>
+      <a href="/top4/draft-room" class="primer-tab" data-tab="draftRoom" data-i18n="league.tab.draftRoom">Планировщик состава</a>
+      <a href="/top4/squads" class="primer-tab" data-tab="squads" data-i18n="league.tab.squads">Составы команд</a>
+      <a href="/top4/stats" class="primer-tab" data-tab="stats" data-i18n="league.tab.stats">Статистика</a>
+      <a href="/top4/live" class="primer-tab" data-tab="live" data-i18n="league.tab.live">Live standing</a>
+      <a href="/top4/results" class="primer-tab" data-tab="results" data-i18n="league.tab.results">Результаты</a>
+      <a href="/top4/transfers" class="primer-tab" data-tab="transfers" data-i18n="league.tab.transfers">Трансферы</a>
+      <a href="/top4/gws" class="primer-tab" data-tab="gws" data-i18n="league.tab.gws">GWs</a>
+      <a href="/top4/schedule" class="primer-tab" data-tab="schedule" data-i18n="league.tab.schedule">Расписание</a>
+      <a href="/top4/rules" class="primer-tab" data-tab="rules" data-i18n="league.tab.rules">Правила</a>
+      <a href="/top4/season" class="primer-tab" data-tab="season2526" data-i18n="league.tab.season">Сезон 2025/26</a>
+      <a href="/top4/season-2026" class="primer-tab" data-tab="season2627" data-i18n="league.tab.season2627">Сезон 2026/2027</a>
+    </nav>
+    <script>
+      (function () {
+        var p = location.pathname.replace(/\/+$/, "") || "/";
+        var slug = p === "/" ? "live" : (p.match(/^\/top4(?:\.html)?(?:\/([^/]+))?$/) || [])[1] || "draft";
+        if (slug === "draft-room" || slug === "draftRoom") slug = "draftRoom";
+        else if (slug === "season" || slug === "season2526") slug = "season2526";
+        else if (slug === "season-2026" || slug === "season2627") slug = "season2627";
+        else if (slug === "statistics") slug = "stats";
+        else if (slug === "live-standing") slug = "live";
+        document.querySelectorAll("#top4-tabs .primer-tab").forEach(function (a) {
+          var on = a.getAttribute("data-tab") === slug;
+          a.classList.toggle("active", on);
+          if (on) a.setAttribute("aria-current", "page");
+          else a.removeAttribute("aria-current");
+        });
+        var rulesNav = document.querySelector('.main-nav a[href="/top4/rules"]');
+        var top4Nav = document.querySelector('.main-nav a[href="/top4.html"]');
+        if (slug === "rules") {
+          if (top4Nav) top4Nav.removeAttribute("aria-current");
+          if (rulesNav) rulesNav.setAttribute("aria-current", "page");
+        }
+      })();
+    </script>
+
+    <main id="main" tabindex="-1">
+    <p class="meta" id="meta" data-i18n="common.loading">Загрузка…</p>
+    <div id="panel"></div>
+
+    <div id="squads-root" class="top4-squads" hidden>
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="league.squads.title">Составы команд</h2>
+        <p class="top4-rules-lead" data-i18n="league.squads.lead">Кто уже напикан у каждой команды.</p>
+        <div id="squads-body"></div>
+      </section>
+    </div>
+
+    <div id="stats-root" class="top4-stats" hidden>
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="league.stats.title">Статистика</h2>
+        <p class="top4-rules-lead" data-i18n="league.stats.lead">Матрицы по напиканным составам: строки — значения, столбцы — команды (коды).</p>
+        <div id="stats-body"></div>
+      </section>
+    </div>
+
+    <div id="draft-room-root" class="top4-draft-room" hidden>
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="draftRoom.title">Планировщик состава</h2>
+        <p class="top4-rules-lead" data-i18n="draftRoom.lead">
+          До 10 наборов схемы и игроков с двумя опциями замены на позицию. Пул: wishlist ∪ напиканный состав.
+        </p>
+        <p class="muted" id="draft-room-meta"></p>
+        <div class="top4-draft-room-toolbar">
+          <button type="button" class="auth-link" id="draft-room-new" data-i18n="draftRoom.new">+ Новый набор</button>
+        </div>
+        <ul class="top4-draft-room-list" id="draft-room-list"></ul>
+        <div id="draft-room-editor" class="top4-draft-room-editor" hidden></div>
+      </section>
+    </div>
+
+    <div id="rules-root" class="top4-rules" hidden>
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="rules.overview">Обзор лиги</h2>
+        <p class="top4-rules-lead" data-i18n-html="rules.t4.lead"></p>
+        <ul class="top4-rules-list">
+          <li data-i18n-html="rules.t4.li1"></li>
+          <li data-i18n-html="rules.t4.li2"></li>
+          <li data-i18n-html="rules.t4.li3"></li>
+          <li data-i18n-html="rules.t4.li4"></li>
+          <li data-i18n-html="rules.t4.li5"></li>
+          <li data-i18n-html="rules.t4.li6"></li>
+          <li data-i18n-html="rules.t4.li7"></li>
+          <li data-i18n-html="rules.t4.li8"></li>
+        </ul>
+      </section>
+
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="rules.multipliers">Множители турниров</h2>
+        <p class="top4-rules-lead" data-i18n="rules.multLead">Очки за матч умножаются на коэффициент соревнования:</p>
+        <div class="table-wrap top4-rules-table-wrap">
+          <table class="top4-rules-table">
+            <thead>
+              <tr>
+                <th data-i18n="rules.comp">Турнир</th>
+                <th data-i18n="rules.mult">Множитель</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <span class="comp-row">
+                    <span class="comp-logos" aria-hidden="true">
+                      <img class="comp-logo" src="/logos/competitions/pl.png" alt="" title="Premier League" />
+                      <img class="comp-logo" src="/logos/competitions/laliga.png" alt="" title="LaLiga" />
+                      <img class="comp-logo" src="/logos/competitions/serie-a.png" alt="" title="Serie A" />
+                      <img class="comp-logo" src="/logos/competitions/bundesliga.png" alt="" title="Bundesliga" />
+                    </span>
+                    <span data-i18n="rules.domestic4">Чемпионаты стран (domestic leagues)</span>
+                  </span>
+                </td>
+                <td class="mono">×2</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="comp-row">
+                    <span class="comp-logos" aria-hidden="true">
+                      <img class="comp-logo" src="/logos/competitions/efl-cup.png" alt="" title="EFL Cup" />
+                    </span>
+                    <span data-i18n="rules.leagueCups">League Cups</span>
+                  </span>
+                </td>
+                <td class="mono">×0.4</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="comp-row">
+                    <span class="comp-logos" aria-hidden="true">
+                      <img class="comp-logo" src="/logos/competitions/ucl.png" alt="" title="UEFA Champions League" />
+                    </span>
+                    <span data-i18n="rules.ucl">UCL (Лига чемпионов)</span>
+                  </span>
+                </td>
+                <td class="mono">×1.5</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="comp-row">
+                    <span class="comp-logos" aria-hidden="true">
+                      <img class="comp-logo" src="/logos/competitions/el.png" alt="" title="UEFA Europa League" />
+                    </span>
+                    <span data-i18n="rules.el">EL (Лига Европы)</span>
+                  </span>
+                </td>
+                <td class="mono">×1.0</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="comp-row">
+                    <span class="comp-logos" aria-hidden="true">
+                      <img class="comp-logo" src="/logos/competitions/uecl.png" alt="" title="UEFA Europa Conference League" />
+                    </span>
+                    <span data-i18n="rules.uecl">UECL (Лига конференций)</span>
+                  </span>
+                </td>
+                <td class="mono">×0.7</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="comp-row">
+                    <span class="comp-logos" aria-hidden="true">
+                      <img class="comp-logo" src="/logos/competitions/fa-cup.png" alt="" title="FA Cup" />
+                      <img class="comp-logo" src="/logos/competitions/copa-del-rey.png" alt="" title="Copa del Rey" />
+                      <img class="comp-logo" src="/logos/competitions/coppa-italia.png" alt="" title="Coppa Italia" />
+                      <img class="comp-logo" src="/logos/competitions/dfb-pokal.png" alt="" title="DFB-Pokal" />
+                    </span>
+                    <span data-i18n="rules.natCups4">National Cups (кубки стран)</span>
+                  </span>
+                </td>
+                <td class="mono">×0.5</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="comp-row">
+                    <span class="comp-logos" aria-hidden="true">
+                      <img class="comp-logo" src="/logos/competitions/uefa-super-cup.png" alt="" title="UEFA Super Cup" />
+                      <img class="comp-logo" src="/logos/competitions/community-shield.png" alt="" title="Community Shield" />
+                      <img class="comp-logo" src="/logos/competitions/supercopa.png" alt="" title="Supercopa de España" />
+                      <img class="comp-logo" src="/logos/competitions/supercoppa.png" alt="" title="Supercoppa Italiana" />
+                      <img class="comp-logo" src="/logos/competitions/dfl-supercup.png" alt="" title="DFL-Supercup" />
+                    </span>
+                    <span data-i18n="rules.superCups">SuperCups</span>
+                  </span>
+                </td>
+                <td class="mono">×0.3</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="rules.fpts">Начисление очков (FPTS)</h2>
+        <p class="top4-rules-lead" data-i18n-html="rules.fptsLead"></p>
+        <div class="table-wrap top4-rules-table-wrap">
+          <table class="top4-rules-table">
+            <thead>
+              <tr>
+                <th data-i18n="rules.event">Событие</th>
+                <th>GKP</th>
+                <th>DEF</th>
+                <th>MID</th>
+                <th>FWD</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-i18n="rules.ev.60">За игру 60+ мин</td>
+                <td class="mono">2</td>
+                <td class="mono">2</td>
+                <td class="mono">2</td>
+                <td class="mono">2</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.lt60">За игру до 60 мин</td>
+                <td class="mono">1</td>
+                <td class="mono">1</td>
+                <td class="mono">1</td>
+                <td class="mono">1</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.full">Сыграл весь матч</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+                <td class="mono">1</td>
+                <td class="mono">1</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.goal">Забитый гол</td>
+                <td class="mono">6</td>
+                <td class="mono">6</td>
+                <td class="mono">5</td>
+                <td class="mono">4</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.assist">Голевая передача</td>
+                <td class="mono">3</td>
+                <td class="mono">3</td>
+                <td class="mono">3</td>
+                <td class="mono">3</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.cs">Сухой матч (60+ мин)</td>
+                <td class="mono">4</td>
+                <td class="mono">4</td>
+                <td class="mono">1</td>
+                <td class="mono">—</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.penSave">Отражённый пенальти</td>
+                <td class="mono">5</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.saves">Каждые 3 сейва</td>
+                <td class="mono">1</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.penMiss">Незабитый пенальти</td>
+                <td class="mono">−2</td>
+                <td class="mono">−2</td>
+                <td class="mono">−2</td>
+                <td class="mono">−2</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.goalsConceded">Каждые 2 пропущенных гола</td>
+                <td class="mono">−1</td>
+                <td class="mono">−1</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.yc">Жёлтая карточка</td>
+                <td class="mono">−1</td>
+                <td class="mono">−1</td>
+                <td class="mono">−1</td>
+                <td class="mono">−1</td>
+              </tr>
+              <tr>
+                <td data-i18n="rules.ev.rc">Красная карточка</td>
+                <td class="mono">−3</td>
+                <td class="mono">−3</td>
+                <td class="mono">−3</td>
+                <td class="mono">−3</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="top4-rules-note" data-i18n-html="rules.idealNote"></p>
+      </section>
+
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="rules.positions">Позиции и состав</h2>
+        <p class="top4-rules-lead" data-i18n="rules.posLead">Правила позиций совпадают с Пример / составом Din8sty.</p>
+        <ul class="top4-rules-list">
+          <li data-i18n-html="rules.pos.li1"></li>
+          <li data-i18n-html="rules.pos.li2"></li>
+          <li data-i18n-html="rules.pos.li3"></li>
+          <li data-i18n-html="rules.pos.li4"></li>
+          <li data-i18n-html="rules.pos.li5"></li>
+          <li data-i18n-html="rules.pos.li6"></li>
+          <li data-i18n-html="rules.pos.li7"></li>
+          <li data-i18n-html="rules.pos.li8"></li>
+        </ul>
+      </section>
+
+      <section class="top4-rules-section">
+        <h2 class="section-title">consigliere</h2>
+        <p class="top4-rules-lead" data-i18n="rules.consigliere.lead">Доверенный человек менеджера (consigliere).</p>
+        <ul class="top4-rules-list">
+          <li data-i18n-html="rules.consigliere.li1"></li>
+          <li data-i18n-html="rules.consigliere.li2"></li>
+          <li data-i18n-html="rules.consigliere.li3"></li>
+          <li data-i18n-html="rules.consigliere.li4"></li>
+        </ul>
+      </section>
+
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="rules.windows">Трансферные окна</h2>
+        <p class="top4-rules-lead" data-i18n-html="rules.win.lead"></p>
+        <ol class="top4-rules-list numbered">
+          <li data-i18n-html="rules.win.li1"></li>
+          <li data-i18n-html="rules.win.li2"></li>
+          <li data-i18n-html="rules.win.li3"></li>
+          <li data-i18n-html="rules.win.li4"></li>
+        </ol>
+        <p data-i18n-html="rules.win.phase"></p>
+        <p data-i18n-html="rules.win.body"></p>
+        <p data-i18n-html="rules.win.order"></p>
+        <p class="top4-rules-note" data-i18n-html="rules.win.note"></p>
+      </section>
+    </div>
+
+    <div id="schedule-root" hidden>
+      <section class="filters top4-schedule-filters">
+        <label>
+          <span data-i18n="common.gameweek">Gameweek</span>
+          <select id="sched-gameweek">
+            <option value="">Все GW2–43</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="common.league">Лига</span>
+          <select id="sched-league">
+            <option value="" data-i18n-option="common.allTop4">Все Топ-4</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="common.club">Клуб</span>
+          <select id="sched-club">
+            <option value="" data-i18n-option="common.allClubs">Все клубы</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="common.status">Статус</span>
+          <select id="sched-status">
+            <option value="" data-i18n-option="common.all">Все</option>
+            <option value="NS" data-i18n-option="status.NS">Не начался</option>
+            <option value="FT" data-i18n-option="status.FT">Завершён</option>
+            <option value="1H" data-i18n-option="status.1H">1-й тайм</option>
+            <option value="HT" data-i18n-option="status.HT">Перерыв</option>
+            <option value="2H" data-i18n-option="status.2H">2-й тайм</option>
+            <option value="LIVE" data-i18n-option="status.LIVE">Live</option>
+            <option value="PST" data-i18n-option="status.PST">Перенесён</option>
+            <option value="CANC" data-i18n-option="status.CANC">Отменён</option>
+          </select>
+        </label>
+      </section>
+      <div class="table-wrap" id="sched-table-wrap">
+        <table class="fixtures-table" id="sched-table">
+          <thead>
+            <tr>
+              <th data-i18n="common.date">Дата</th>
+              <th>GW</th>
+              <th data-i18n="common.competition">Турнир</th>
+              <th data-i18n="common.roundCol">Тур</th>
+              <th data-i18n="common.homeTeam">Хозяева</th>
+              <th></th>
+              <th data-i18n="common.awayTeam">Гости</th>
+              <th data-i18n="schedule.xi" title="Команды менеджеров, у которых игрок этого матча стоит в основе на GW">XI</th>
+              <th data-i18n="schedule.full" title="Команды менеджеров, у которых в составе есть игрок этого матча">FULL</th>
+              <th data-i18n="common.status">Статус</th>
+            </tr>
+          </thead>
+          <tbody id="sched-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="live-root" class="top4-results top4-live" hidden>
+      <section class="top4-rules-section">
+        <div class="top4-live-stand-head">
+          <h2 class="section-title" data-i18n="league.liveStand.title">Live standing</h2>
+          <span class="muted top4-live-synced" id="live-synced" hidden></span>
+        </div>
+        <p class="top4-rules-lead" id="live-lead" data-i18n="common.loading">Загрузка…</p>
+      </section>
+      <div class="table-wrap top4-results-table-wrap">
+        <table class="top4-results-table top4-live-table" id="live-table">
+          <thead id="live-thead"></thead>
+          <tbody id="live-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="results-root" class="top4-results" hidden>
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="league.results.title">Результаты</h2>
+        <p class="top4-rules-lead" id="results-lead" data-i18n="common.loading">Загрузка…</p>
+        <ul class="top4-rules-list" id="results-notes"></ul>
+      </section>
+      <div class="table-wrap top4-results-table-wrap">
+        <table class="top4-results-table" id="results-table">
+          <thead id="results-thead"></thead>
+          <tbody id="results-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="transfers-root" class="top4-transfers" hidden>
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="league.tab.transfers">Трансферы</h2>
+        <div class="top4-transfers-head">
+          <p class="top4-rules-lead" id="transfers-lead" data-i18n="common.loading">Загрузка…</p>
+          <div id="transfers-admin" hidden></div>
+        </div>
+      </section>
+      <div id="transfers-body"></div>
+    </div>
+
+    <div id="gws-root" class="top4-gws" hidden>
+      <section class="top4-rules-section">
+        <h2 class="section-title" data-i18n="league.gws.title">GWs</h2>
+        <p class="top4-rules-lead" id="gws-lead" data-i18n="common.loading">Загрузка…</p>
+      </section>
+      <div id="gws-body"></div>
+    </div>
+
+    <div id="season-root" class="top4-season" hidden>
+      <section class="top4-rules-section" id="season-summary">
+        <h2 class="section-title" id="season-title" data-i18n="league.seasonTitle">Сезон 2025/26 · эмуляция FPTS</h2>
+        <p class="top4-rules-lead" id="season-lead" data-i18n="common.loading">Загрузка…</p>
+        <ul class="top4-rules-list" id="season-notes"></ul>
+      </section>
+      <section class="filters top4-pool-filters" id="season-filters">
+        <label>
+          <span data-i18n="common.league">Лига</span>
+          <select id="season-league">
+            <option value="" data-i18n-option="common.allTop4">Все Топ-4</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="common.club">Клуб</span>
+          <select id="season-club">
+            <option value="" data-i18n-option="common.allClubs">Все клубы</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="common.line">Линия</span>
+          <select id="season-line">
+            <option value="" data-i18n-option="common.all">Все</option>
+            <option value="GKP">GKP</option>
+            <option value="DEF">DEF</option>
+            <option value="MID">MID</option>
+            <option value="FWD">FWD</option>
+          </select>
+        </label>
+        <label>
+          <span data-i18n="common.search">Поиск</span>
+          <input type="search" id="season-q" placeholder="Игрок или клуб" data-i18n-placeholder="league.seasonSearchPh" autocomplete="off" />
+        </label>
+      </section>
+      <section class="season-charts" id="season-charts" aria-label="Диаграммы сезона" data-i18n-aria="league.seasonChartsAria">
+        <div class="season-chart-card" id="season-chart-club"></div>
+        <div class="season-chart-card" id="season-chart-player"></div>
+        <div class="season-chart-tip" id="season-chart-tip" hidden></div>
+      </section>
+      <div class="table-wrap">
+        <table class="compact-table" id="season-table">
+          <thead>
+            <tr id="season-thead"></tr>
+          </thead>
+          <tbody id="season-rows"></tbody>
+        </table>
+      </div>
+      <div class="top4-pool-pager" id="season-pager">      </div>
+    </div>
+
+    </main>
+
+    <div id="lottery-overlay" class="lottery-overlay" hidden>
+      <div class="lottery-card">
+        <p class="lottery-eyebrow" data-i18n="league.lotteryEyebrow">Жеребьёвка драфта</p>
+        <p class="lottery-spin" id="lottery-spin">…</p>
+        <ol class="lottery-results" id="lottery-results"></ol>
+      </div>
+    </div>
+
+    <div id="confirm-overlay" class="lottery-overlay confirm-overlay" hidden>
+      <div class="lottery-card confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-msg">
+        <p class="confirm-msg" id="confirm-msg"></p>
+        <div class="confirm-actions">
+          <button type="button" class="auth-btn confirm-yes" id="confirm-yes" data-i18n="common.confirm">Подтвердить</button>
+          <button type="button" class="auth-link confirm-no" id="confirm-no" data-i18n="common.cancel">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="fpts-breakdown-overlay" class="lottery-overlay confirm-overlay" hidden>
+      <div class="lottery-card fpts-bd-card" role="dialog" aria-modal="true" aria-labelledby="fpts-bd-name">
+        <div class="fpts-bd-head">
+          <button type="button" class="auth-link fpts-bd-back" id="fpts-bd-back" hidden aria-label="←">←</button>
+          <div class="fpts-bd-who">
+            <h3 class="subhead" id="fpts-bd-name"></h3>
+            <p class="muted fpts-bd-club" id="fpts-bd-club"></p>
+          </div>
+          <button type="button" class="auth-link fpts-bd-close" id="fpts-bd-close" data-i18n-aria="common.close" aria-label="Закрыть">×</button>
+        </div>
+        <div class="fpts-bd-body" id="fpts-bd-body"></div>
+        <p class="fpts-bd-total">
+          <span id="fpts-bd-total-label"></span>
+          <span class="mono" id="fpts-bd-total"></span>
+        </p>
+      </div>
+    </div>
+
+    <div id="replace-auto-overlay" class="lottery-overlay replace-auto-overlay" hidden>
+      <div class="lottery-card replace-auto-card" role="dialog" aria-modal="true" aria-labelledby="replace-auto-title">
+        <div class="replace-auto-head">
+          <h3 class="subhead" id="replace-auto-title"></h3>
+          <button type="button" class="auth-link" id="replace-auto-close" aria-label="close">×</button>
+        </div>
+        <p class="muted replace-auto-lead" id="replace-auto-lead"></p>
+        <label class="replace-auto-search">
+          <input type="search" id="replace-auto-q" autocomplete="off" data-i18n-placeholder="common.search" placeholder="Поиск" />
+        </label>
+        <div class="replace-auto-list table-wrap nested" id="replace-auto-list"></div>
+      </div>
+    </div>
+
+    <script src="/i18n.js"></script>
+    <script src="/auth.js"></script>
+    <script src="/top4.js"></script>
+  </body>
+</html>

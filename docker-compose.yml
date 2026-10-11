@@ -1,0 +1,61 @@
+# Runs alongside panenka.games on the shared Docker network so Caddy can proxy.
+# Caddy site block lives in /opt/panenka.games/Caddyfile (din8sty.panenka.games).
+
+services:
+  din8sty:
+    build: .
+    image: din8sty:latest
+    container_name: din8sty
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3080"
+      HOST: "0.0.0.0"
+      DIN8STY_DB: /app/data/din8sty.db
+      PANENKA_ORIGIN: https://panenka.games
+      # SSO_SECRET is synced from panenka AUTH_SECRET by scripts/deploy.sh
+    volumes:
+      # Host bind-mount: live draft + registrations survive image rebuild / container recreate.
+      # Deploy must never replace data/*.db* (see scripts/deploy.sh excludes + snapshot verify).
+      - ./data:/app/data
+      # Allow scrape script updates without image rebuild
+      - ./scripts:/app/scripts:ro
+    expose:
+      - "3080"
+    networks:
+      - panenkagames_default
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "require('http').get('http://127.0.0.1:3080/api/health',(r)=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Top-4 draft turn pings via Telegram (/pihajme). Token: TOP4_PING_BOT_TOKEN in .env.bot
+  top4-ping-bot:
+    image: din8sty:latest
+    container_name: din8sty-top4-ping-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DIN8STY_DB: /app/data/din8sty.db
+    volumes:
+      - ./data:/app/data
+    networks:
+      - panenkagames_default
+    depends_on:
+      - din8sty
+    command: ["npx", "tsx", "src/top4PingBot.ts"]
+    healthcheck:
+      disable: true
+
+networks:
+  panenkagames_default:
+    external: true

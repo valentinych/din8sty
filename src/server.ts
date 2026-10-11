@@ -39,6 +39,7 @@ import {
   seasonGameweekWhere,
 } from "./fixturesFilter.js";
 import {
+  defaultTop4LineupGw,
   gameweekFromKickoff,
   gameweekRange,
   lineupDeadlinePassed,
@@ -138,6 +139,7 @@ import {
   computeRosterForm,
   computeRosterGwFpts,
   computeTop4SquadsSeasonFpts,
+  computeTop4TeamGwResult,
   ensureLiveGwStatsSynced,
   getIndexGwFpMap,
   top4GwHasKickedOff,
@@ -911,6 +913,8 @@ async function main() {
   /**
    * Which emails are known to @draftmantra_bot (H2H / FPL / UCL / Top-4 binds).
    * Auth: X-H2H-Bot-Secret (same secret as panenka H2H bot bridge).
+   * Returns optional telegram username — from the bind row or the same
+   * telegram_user_id in panenka_links / other bot tables.
    */
   app.get("/api/draftmantra/known-emails", async (req, reply) => {
     const secret = process.env.H2H_BOT_SECRET?.trim();
@@ -923,29 +927,130 @@ async function main() {
       .split(",")
       .map((e) => e.trim().toLowerCase())
       .filter((e) => e.includes("@"));
-    if (!emails.length) return { ok: true, known: [] as string[] };
+    if (!emails.length) {
+      return {
+        ok: true,
+        known: [] as { email: string; telegram: string | null }[],
+      };
+    }
 
     const placeholders = emails.map(() => "?").join(",");
-    const known = new Set<string>();
-    const tables = [
-      "h2h_telegram_links",
-      "fpl_telegram_links",
-      "ucl_telegram_links",
-      "top4_telegram_links",
+    type Hit = { email: string; telegram_user_id: number | null; telegram: string | null };
+    const byEmail = new Map<string, Hit>();
+
+    const cleanTg = (raw: string | null | undefined) => {
+      const t = String(raw ?? "")
+        .replace(/^@/, "")
+        .trim();
+      return t || null;
+    };
+
+    const mark = (
+      email: string,
+      telegramUserId: number | null | undefined,
+      telegram?: string | null
+    ) => {
+      const e = email.trim().toLowerCase();
+      if (!e) return;
+      const tg = cleanTg(telegram);
+      const prev = byEmail.get(e);
+      if (!prev) {
+        byEmail.set(e, {
+          email: e,
+          telegram_user_id: telegramUserId ?? null,
+          telegram: tg,
+        });
+        return;
+      }
+      if (prev.telegram_user_id == null && telegramUserId != null) {
+        prev.telegram_user_id = telegramUserId;
+      }
+      if (!prev.telegram && tg) prev.telegram = tg;
+    };
+
+    const emailTables = [
+      { table: "h2h_telegram_links", hasTg: true },
+      { table: "fpl_telegram_links", hasTg: true },
+      { table: "ucl_telegram_links", hasTg: true },
+      { table: "top4_telegram_links", hasTg: true },
     ] as const;
-    for (const table of tables) {
+    for (const { table, hasTg } of emailTables) {
       try {
-        const rows = db
-          .prepare(
-            `SELECT lower(email) AS email FROM ${table} WHERE lower(email) IN (${placeholders})`
-          )
-          .all(...emails) as { email: string }[];
-        for (const r of rows) if (r.email) known.add(r.email);
+        const sql = hasTg
+          ? `SELECT lower(email) AS email, telegram_user_id, tg_username AS telegram
+             FROM ${table} WHERE lower(email) IN (${placeholders})`
+          : `SELECT lower(email) AS email, telegram_user_id, NULL AS telegram
+             FROM ${table} WHERE lower(email) IN (${placeholders})`;
+        for (const r of db.prepare(sql).all(...emails) as Hit[]) {
+          mark(r.email, r.telegram_user_id, r.telegram);
+        }
       } catch {
-        /* table may be missing in older DBs */
+        /* older DB / missing tg_username column — retry without username */
+        try {
+          const rows = db
+            .prepare(
+              `SELECT lower(email) AS email, telegram_user_id, NULL AS telegram
+               FROM ${table} WHERE lower(email) IN (${placeholders})`
+            )
+            .all(...emails) as Hit[];
+          for (const r of rows) mark(r.email, r.telegram_user_id, r.telegram);
+        } catch {
+          /* table missing */
+        }
       }
     }
-    return { ok: true, known: [...known] };
+
+    // Fill missing usernames from any table keyed by the same telegram_user_id.
+    const ids = [
+      ...new Set(
+        [...byEmail.values()]
+          .map((h) => h.telegram_user_id)
+          .filter((id): id is number => id != null)
+      ),
+    ];
+    if (ids.length) {
+      const idPh = ids.map(() => "?").join(",");
+      const usernameSources = [
+        "SELECT telegram_user_id, tg_username AS telegram FROM panenka_links WHERE telegram_user_id IN (" +
+          idPh +
+          ") AND tg_username IS NOT NULL AND tg_username != ''",
+        "SELECT telegram_user_id, tg_username AS telegram FROM top4_telegram_links WHERE telegram_user_id IN (" +
+          idPh +
+          ") AND tg_username IS NOT NULL AND tg_username != ''",
+        "SELECT telegram_user_id, tg_username AS telegram FROM fpl_telegram_links WHERE telegram_user_id IN (" +
+          idPh +
+          ") AND tg_username IS NOT NULL AND tg_username != ''",
+        "SELECT telegram_user_id, tg_username AS telegram FROM ucl_telegram_links WHERE telegram_user_id IN (" +
+          idPh +
+          ") AND tg_username IS NOT NULL AND tg_username != ''",
+      ];
+      const byId = new Map<number, string>();
+      for (const sql of usernameSources) {
+        try {
+          for (const r of db.prepare(sql).all(...ids) as {
+            telegram_user_id: number;
+            telegram: string;
+          }[]) {
+            const tg = cleanTg(r.telegram);
+            if (tg && !byId.has(r.telegram_user_id)) byId.set(r.telegram_user_id, tg);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      for (const hit of byEmail.values()) {
+        if (hit.telegram || hit.telegram_user_id == null) continue;
+        hit.telegram = byId.get(hit.telegram_user_id) ?? null;
+      }
+    }
+
+    return {
+      ok: true,
+      known: [...byEmail.values()].map((h) => ({
+        email: h.email,
+        telegram: h.telegram,
+      })),
+    };
   });
 
   /** Current user + team assignment (null user when anonymous). claimedTeamIds has no emails. */
@@ -1181,6 +1286,30 @@ async function main() {
     } catch (err) {
       return reply.code(500).send({
         error: err instanceof Error ? err.message : "results_failed",
+      });
+    }
+  });
+
+  app.get("/api/top4/results/:teamId/:gw", async (req, reply) => {
+    if (!dbWrite) {
+      return reply.code(503).send({ error: "db_write_unavailable" });
+    }
+    const { teamId: teamRaw, gw: gwRaw } = req.params as {
+      teamId?: string;
+      gw?: string;
+    };
+    const teamId = Number(teamRaw);
+    const gw = Number(gwRaw);
+    if (!Number.isFinite(teamId) || !Number.isFinite(gw)) {
+      return reply.code(400).send({ error: "bad_request" });
+    }
+    try {
+      const payload = computeTop4TeamGwResult(dbWrite, teamId, gw);
+      if (!payload) return reply.code(404).send({ error: "not_found" });
+      return payload;
+    } catch (err) {
+      return reply.code(500).send({
+        error: err instanceof Error ? err.message : "results_gw_failed",
       });
     }
   });
@@ -2605,7 +2734,7 @@ async function main() {
   /**
    * Lineup editor payload: roster + formations + GW fixtures + saved slots.
    * Query: team_id (optional → own mapped team), gw (optional).
-   * Top-4 default gw = next (= gameweekFromKickoff(now)+1); Primer stays first GW.
+   * Top-4 default gw = current Fri–Sun London, next from Monday; Primer stays first GW.
    * Other teams only after lineup deadline (GW Fri 00:00 London); no admin peek.
    */
   app.get("/api/lineup", async (req, reply) => {
@@ -2666,15 +2795,16 @@ async function main() {
         }
         return [...set].sort((a, b) => a - b);
       })();
-      // Same as GWs/Results tabs: current = London Friday week, next = current+1.
+      // current = London Friday week; default XI editor: current Fri–Sun, next from Mon.
       const currentGw = Math.max(1, gameweekFromKickoff(new Date()));
       const nextGw = currentGw + 1;
+      const preferredGw = defaultTop4LineupGw();
       let gw = q.gw ? Number(q.gw) : NaN;
       if (!Number.isFinite(gw) || (gwList.length && !gwList.includes(gw))) {
-        // Default to next GW (not current); fall back if fixtures missing that week.
-        if (gwList.includes(nextGw)) gw = nextGw;
+        if (gwList.includes(preferredGw)) gw = preferredGw;
         else if (gwList.includes(currentGw)) gw = currentGw;
-        else gw = gwList[0] ?? nextGw;
+        else if (gwList.includes(nextGw)) gw = nextGw;
+        else gw = gwList[0] ?? preferredGw;
       }
       const isManager = managerEmail === user.email.toLowerCase();
       const isConsigliere = isManager

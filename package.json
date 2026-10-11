@@ -1,0 +1,38 @@
+{
+  "name": "din8sty",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "db:build": "tsx scripts/build-players-db.ts",
+    "fm:scrape": "python3 scripts/scrape_fminside.py",
+    "fm:scrape:previous": "python3 scripts/scrape_previous_clubs.py",
+    "fm:match": "tsx scripts/match-fminside.ts",
+    "capology:sync": "tsx scripts/sync-capology.ts",
+    "fixtures:sync": "tsx scripts/sync-fixtures.ts",
+    "fixtures:gameweeks": "tsx scripts/backfill-gameweeks.ts",
+    "fm:scrape:known": "python3 scripts/scrape_known.py",
+    "transfers:sync": "tsx scripts/sync-transfers.ts",
+    "coaches:sync": "tsx scripts/sync-coaches.ts",
+    "primer:draft": "tsx scripts/primer-draft.ts",
+    "top4:season:sync": "tsx scripts/sync-top4-season-stats.ts",
+    "top4:gw:sync": "tsx scripts/sync-top4-gw-stats.ts",
+    "top4:seed-codes": "tsx scripts/seed-top4-team-codes.ts",
+    "test": "tsx --test src/*.test.ts",
+    "top4:ping-bot": "tsx src/top4PingBot.ts",
+    "top8:season:sync": "tsx scripts/sync-top8-season-stats.ts"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.3.0",
+    "better-sqlite3": "^11.10.0",
+    "fastify": "^5.3.3",
+    "tsx": "^4.19.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.21",
+    "typescript": "^5.8.3"
+  }
+}
